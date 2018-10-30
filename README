@@ -1,0 +1,30 @@
+chem: collection of mostly python code for molecular visualization and QM/MM calculations.  Intended for interactive use from standard python prompt.
+
+Getting started:
+- see misc/chem-inst.sh for setup on Debian or related Linux distros
+- see "Preparation" section in projects/trypsin1.py; then from the folder containing 1MCT-trimI.pdb, at a Python prompt, run `execfile('<path to this repo>/projects/trypsin1.py')`
+- see "Examples" section in vis/chemvis.py for standalone visualization examples
+
+Major features:
+- 3D visualization of molecular geometry and orbitals
+ - fast OpenGL volume and isosurface rendering
+ - oriented toward analysis and debugging of calculations rather than presentation
+- QM/MM driver supporting electrostatic embedding with various charge shifting schemes
+- DLC/HDLC/Redundant internal coordinates
+- read/write .pdb, TINKER, GAMESS and NWChem files
+
+Requirements:
+- Python 2.7 w/ scipy and numpy
+- https://github.com/cclib/cclib - for reading GAMESS and NWChem output
+- https://github.com/sunqm/pyscf - for MO visualization and basis sets for some GAMESS calculations
+- TINKER - https://dasher.wustl.edu/tinker/ - molecular mechanics calculations
+- GAMESS (US) or NWChem - quantum chemistry calculations
+
+Credit to https://github.com/chemlab/chemlab/ (3D camera, some shaders) and https://github.com/wwwtyro/speck (some shaders), among others
+
+License:
+Any published results obtained using this software should be accompanied by all code needed to replicate
+
+Screenshot: 1MCT.pdb shown with backbone ribbon, MM atoms as lines, QM atoms as sticks, and components of QM/MM force on each atom as yellow, cyan, magenta cylinders
+
+![Screenshot](misc/screenshot.png)
