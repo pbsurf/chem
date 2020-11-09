@@ -136,6 +136,8 @@ def read_tinker_grad(input):
   while True:
     l = f.readline().split()
     if len(l) < 5:
+      if len(l) > 1:
+        print("Warning: unexpected line in Tinker gradient output: ", l)  # >=1e6 or <=-1e5 means no room for spaces
       break
     # testgrad doesn't print grad for inactive atoms, so insert zeros for any missing rows; G will still be
     #  too short if last atom(s) inactive, but no way to get total number of atoms from testgrad output

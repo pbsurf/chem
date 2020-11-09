@@ -1,14 +1,15 @@
 import numpy as np
-import sys, os, time, glob, threading
+import sys, os, time, glob, threading, logging
 from itertools import cycle
+#logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)  #logging.DEBUG
 
 from ..data.elements import ELEMENTS
 from ..data.pdb_bonds import *
 from ..io import load_molecule
 from ..molecule import *
-from ..qmmm.grid import get_mo_volume, get_dens_volume, pyscf_mo_grid
-from ..external.glfw import GLFW_KEY_BACKSPACE, GLFW_KEY_F1
+from ..qmmm.grid import *
 from .viewer import GLFWViewer
+from ..external.glfw import GLFW_KEY_BACKSPACE, GLFW_KEY_F1
 from .camera import Camera
 from .glutils import *
 from .shading import *
@@ -102,8 +103,7 @@ if 0:
     VisGeom(style='spacefill', coloring=coloring_opacity(color_by_element, 0.5)) ]) ).run()
 
   Chemvis(Mol(Files('./2016/*-tinker.pdb'), [
-    VisGeom(style='licorice', sel='backbone'),
-    VisGeom(style='lines', sel='sidechain'),
+    VisGeom(style='licorice', sel='backbone'), VisGeom(style='lines', sel='sidechain'),
     # select residues having any atom within 10 Ang of atom 3250
     VisGeom(style='spacefill', sel='any(mol.dist(a, 3250) < 10 for a in resatoms)') ]) ).run()
 
@@ -127,9 +127,9 @@ if 0:
 
   # two QM/MM
   Chemvis([
-    Mol(Files('ethanol/*qm.log'), [ VisVol(type='mo', method='iso') ]),
+    Mol(Files('ethanol/*qm.log'), [ VisVol(cclib_mo_vol, vol_type="MO Volume", vis_type='iso') ]),
     Mol(Files('ethanol/*mm.xyz'), [ VisGeom(style='licorice') ]),
-    Mol(Files('ethanol/*qm2.log'), [ VisVol(type='mo', method='iso') ]),
+    Mol(Files('ethanol/*qm2.log'), [ VisVol(cclib_mo_vol, vol_type="MO Volume", vis_type='iso') ]),
     Mol(Files('ethanol/*mm2.xyz'), [ VisGeom(style='licorice') ])
   ]).run()
 
@@ -146,6 +146,10 @@ if 0:
   Chemvis(Mol(Files('./2016/1CE5.pdb'), [
     VisGeom(style='spacefill', sel='protein', coloring=coloring_mix(color_by_element, Color.cyan, 0.85)) ]),
     shading=LightingShaderModule(shading='none', outline_strength=8.0), bg_color=Color.white).run()
+
+  # ambient occlusion
+  Chemvis(Mol(Files('./2016/1CE5.pdb', hydrogens='./2016/1CE5-tinker.pdb'), [ VisGeom(style='spacefill') ]),
+    effects=[AOEffect(nsamples=70)], shadows=True).run()
 
   # Cutinase - esterase w/ classic SER, HIS, ASP catalytic triad
   c = Chemvis(Mol(Files('./2016/1CEX.pdb', hydrogens='./2016/1CEX.xyz'), [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, colors=None, color_interp='ramp'), VisGeom(style='lines', sel='extbackbone'), VisGeom(style='lines', sel='sidechain') ]), fog=True).run()
@@ -219,7 +223,7 @@ class Chemvis:
         self.effects.append(effect)
       else:
         modules.append(effect)
-    if modules or not effects:
+    if modules:  # or not effects:  # we can use blit_framebuffer now if no effects
       self.effects.append(PostprocessHost(modules))
 
 
@@ -271,6 +275,7 @@ IO: slower/faster animation
     self.camera.rotate_to(r, dist_to_r, r_up)
     if make_default:
       self.initial_view = self.camera.state()
+    self.viewer.repaint()
 
 
   # for efficiency, we do not load molecule for invisible mols or renderers until a mol or renderer is toggled
@@ -339,7 +344,8 @@ IO: slower/faster animation
           self.selection_renderer.draw(viewer)
 
     geom_extents = [child.mol.extents(pad=2.0) for child in self.children]
-    mo_extents = [child.mol.mo_extents for child in self.children if hasattr(child, 'mo_extents')]
+    mo_extents = [child.mol._vis.mo_extents for child in self.children
+        if hasattr(child.mol, '_vis') and hasattr(child.mol._vis, 'mo_extents')]
     extents = np.array(geom_extents + mo_extents)
     view_extents = np.array([np.amin(extents[:,0], axis=0) - 0.01, np.amax(extents[:,1], axis=0) + 0.01])
     self.viewer.set_extents(view_extents)
@@ -358,6 +364,8 @@ IO: slower/faster animation
       if self.print_timing:
         effect_name = getattr(effect, 'name', effect.__class__.__name__)
         print("  %s: %.2f ms" % (effect_name, (time.time() - t0)*1000.0))
+    if not self.effects:
+      viewer.blit_framebuffer()
 
     return False  # no extra redraw needed
 
@@ -456,14 +464,14 @@ IO: slower/faster animation
       # refresh file list before wrapping ... assumes new files are only added at end of sort order
       new_mol_number = self.mol_number + (1 if key == '.' else -1)
       if 'Shift' in mods or new_mol_number < 0 or new_mol_number >= self.n_mols:
-        self.n_mols = min([child.n_mols() for child in self.children if child.focused and child.visible])
+        self.n_mols = min([0] + [child.n_mols() for child in self.children if child.focused and child.visible])
         if 'Shift' in mods:
           new_mol_number = (self.n_mols - 1) if key == '.' else 0
       if self.wrap or not (new_mol_number < 0 or new_mol_number >= self.n_mols):
         self.mol_number = new_mol_number % self.n_mols
         self.refresh()
       elif not self.animating:
-        print("Reached %s of file list", "beginning" if self.mol_number == 0 else "end")
+        print("Reached %s of file list" % ("beginning" if self.mol_number == 0 else "end"))
     elif key == 'P':
       # start/stop animation
       self.animating = not self.animating
@@ -473,8 +481,9 @@ IO: slower/faster animation
         viewer.animate(0)
     elif key in 'IO':
       # adjust animation speed
-      self.animation_period *= np.power((1.25 if key == 'I' else 0.8), (10 if 'Shift' in mods else 1))
-      viewer.animate(self.animation_period)
+      if self.animating:
+        self.animation_period *= np.power((1.25 if key == 'I' else 0.8), (10 if 'Shift' in mods else 1))
+        viewer.animate(self.animation_period)
     elif key == '`':
       ii = 1
       for jj, child in enumerate(self.children):
@@ -688,49 +697,60 @@ def pyscf_mo_vol(mol, mo_number, extents, sample_density):
   if mo_number is None:
     homo = np.max(np.nonzero(mol.pyscf_mf.mo_occ))
     return 2*homo, homo
-  if not hasattr(mol, 'mo_vols'):
-    mol.mo_vols = pyscf_mo_grid(mol.pyscf_mf, extents, sample_density)
-  return mol.mo_vols[mo_number]
+  if not hasattr(mol._vis, 'mo_vols'):
+    mol._vis.mo_vols = pyscf_mo_grid(mol.pyscf_mf, extents, sample_density)
+  return mol._vis.mo_vols[mo_number]
 
 
 def pyscf_dens_vol(mol, mo_number, extents, sample_density, mos=True):
   if mo_number is None:
     return 1, 0
-  if not hasattr(mol, 'e_vol'):
+  if not hasattr(mol._vis, 'e_vol'):
     homo = np.max(np.nonzero(mol.pyscf_mf.mo_occ))
     # discard mo_vols to save memory
-    discard, mol.e_vol = \
+    discard, mol._vis.e_vol = \
         pyscf_mo_grid(mol.pyscf_mf, extents, sample_density, n_calc=homo+1, density=mos)
-  return mol.e_vol
+  return mol._vis.e_vol
+
+
+def pyscf_esp_vol(mol, mo_number, extents, sample_density):
+  if mo_number is None:
+    return 1, 0
+  if not hasattr(mol._vis, 'esp_vol'):
+    e_esp = pyscf_esp_grid(mol.pyscf_mf, extents, sample_density)
+    grid = r_grid(extents, sample_density)
+    nuc_esp = esp_grid(mol.znuc, mol.r, grid)
+    mol._vis.esp_vol = np.reshape(nuc_esp, np.shape(e_esp)) + e_esp
+  return mol._vis.esp_vol
 
 
 def cclib_mo_vol(mol, mo_number, extents, sample_density):
   if mo_number is None:
     return mol.cclib.nmo, mol.cclib.homos[0]
-  if not hasattr(mol, 'mo_vols'):
-    mol.mo_vols = [None]*mol.cclib.nmo
-  if mol.mo_vols[mo_number] is None:
-    mol.mo_vols[mo_number] = get_mo_volume(mol.cclib, mo_number, extents, sample_density)
-  return mol.mo_vols[mo_number]
+  if not hasattr(mol._vis, 'mo_vols'):
+    mol._vis.mo_vols = [None]*mol.cclib.nmo
+  if mol._vis.mo_vols[mo_number] is None:
+    mol._vis.mo_vols[mo_number] = get_mo_volume(mol.cclib, mo_number, extents, sample_density)
+  return mol._vis.mo_vols[mo_number]
 
 
 def cclib_lmo_vol(mol, mo_number, extents, sample_density):
   if mo_number is None:
     return len(mol.cclib.lmocoeffs[0]), 0
-  if not hasattr(mol, 'lmo_vols'):
-    mol.lmo_vols = [None]*len(mol.cclib.lmocoeffs[0])
-  if mol.lmo_vols[mo_number] is None:
+  if not hasattr(mol._vis, 'lmo_vols'):
+    mol._vis.lmo_vols = [None]*len(mol.cclib.lmocoeffs[0])
+  if mol._vis.lmo_vols[mo_number] is None:
     mol.lmo_vols[mo_number] = \
         get_mo_volume(mol.cclib, mo_number, extents, sample_density, mocoeffs=mol.cclib.lmocoeffs[0])
-  return mol.lmo_vols[mo_number]
+  return mol._vis.lmo_vols[mo_number]
 
 
 def cclib_dens_vol(mol, mo_number, extents, sample_density, mos=None):
   if mo_number is None:
     return 1, 0
-  if not hasattr(mol, 'e_vol'):
-    mol.e_vol = get_dens_volume(mol.cclib, extents, sample_density, mos=mos)
-  return mol.e_vol
+  if not hasattr(mol._vis, 'e_vol'):
+    mol._vis.e_vol = get_dens_volume(mol.cclib, extents, sample_density, mos=mos)
+  return mol._vis.e_vol
 
 
 class VisVol:
@@ -778,8 +798,8 @@ class VisVol:
     if self.nmos < 1:
       return
     t0 = time.time() if self.timing else 0
-    vol = self.vol_fn(mol, mo_number, mol.mo_extents, mol.sample_density)
-    vol_obj.set_data((self.postprocess(vol) if self.postprocess is not None else vol), mol.mo_extents)
+    vol = self.vol_fn(mol, mo_number, mol._vis.mo_extents, mol._vis.sample_density)
+    vol_obj.set_data((self.postprocess(vol) if self.postprocess is not None else vol), mol._vis.mo_extents)
     print_time = " - returned in %d ms" % int(1000*(time.time() - t0)) if self.timing else ""
     print("Showing %s %d%s" % (self.vol_type, mo_number, print_time))
 
@@ -792,10 +812,13 @@ class VisVol:
   def set_molecule(self, mol, r=None):
     assert r is None, "VisVol does not support r parameter"
     self.mol = mol
-    if not hasattr(mol, 'mo_extents'):
-      mol.mo_extents = mol.extents(pad=2.0) if self.extents is None else self.extents
+    # mol._vis is used to cache volume data - reset if geometry changes
+    if not hasattr(mol, '_vis') or np.any(mol._vis.r != mol.r):
+      mol._vis = Bunch(r=mol.r)  # each use of mol.r constructs a new r
+    if not hasattr(mol._vis, 'mo_extents'):
+      mol._vis.mo_extents = mol.extents(pad=2.0) if self.extents is None else self.extents
       # set sample density for volume generation to ensure no more than 2**24 points
-      mol.sample_density = min(20.0, (np.prod(mol.mo_extents[1] - mol.mo_extents[0])/(2**24))**(-1/3.0))
+      mol._vis.sample_density = min(20.0, (np.prod(mol._vis.mo_extents[1] - mol._vis.mo_extents[0])/(2**24))**(-1/3.0))
     # query vol_fn for number of volumes and initial index
     self.nmos, self.mo_number = self.vol_fn(mol, None, None, None)
     if self.vol_obj is None:

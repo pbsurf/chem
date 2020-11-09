@@ -27,6 +27,17 @@ def setitem(obj, idx, val):
   return obj
 
 
+def getvalues(d, *args):
+  """ get multiple values from dict, e.g., x, y = getvalues(dictionary, 'x', 'y') """
+  return tuple(d.get(k, None) for k in args)
+
+
+def getattrs(obj, *args):
+  """ get multiple values from object, e.g., x, y = getattrs(obj, 'x', 'y') """
+  return tuple(getattr(obj, k, None) for k in args)
+  #return tuple(getattr(obj, k, v) for k,v in kwargs.items())  -- kwargs order only guaranteed in python 3.6+
+
+
 def argsort(seq):
   return sorted(range(len(seq)), key=seq.__getitem__)
 
@@ -80,7 +91,7 @@ def skiptoline(f, line, extra=0):
 ## math
 
 def norm(v):
-  return math.sqrt(np.dot(v,v))  # faster than np.linalg.norm
+  return math.sqrt(np.vdot(v,v))  # faster than np.linalg.norm; vdot flattens to 1D
 
 def normalize(v):
   v = np.asarray(v)

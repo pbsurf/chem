@@ -4,9 +4,9 @@ from chem.molecule import *
 from chem.io import load_molecule, cclib_open
 from chem.io.pdb import copy_residues, write_pdb
 from chem.io.tinker import write_tinker_xyz, tinker_EandG
+from chem.opt.dlc import DLC, Cartesian, HDLC
+from chem.opt.optimize import optimize, XYZ
 from chem.qmmm.qmmm1 import QMMM
-from chem.qmmm.dlc import DLC, Cartesian, HDLC
-from chem.qmmm.optimize import optimize, XYZ
 from chem.qmmm.prepare import protonation_check, neutralize
 
 # QM/MM calculation of peptide bond hydrolysis reaction by trypsin, mostly following Ishida & Kato JACS 125,
@@ -56,6 +56,7 @@ from chem.qmmm.prepare import protonation_check, neutralize
 # - try adding polarizations fns (6-31G**) to cap atoms?
 # - try including M1 (and M2?) in DLC object for optim (see dlcatoms below)
 # - what if we optimize w/ just one sidechain at a time as QM region, then final opt w/ full QM region?
+# - additional energy term to help restrain MM positions to PDB positions, relaxed (to zero?) eventually, for MM prep?
 
 # - let's use individual sidechains as smaller test systems for debugging
 #  - then backbone alone, figuring out how to handle the anomalously large grad there
@@ -196,7 +197,7 @@ if not os.path.exists(mm_opt_xyz):
   # first pass moving only hydrogens and neutralizing ions
   h_and_cl = select_atoms(trypsin, 'znuc in [1, 11, 17]')
   res, r = optimize(trypsin, fn=tinker_EandG, fnargs=tinker_args, coords=XYZ(trypsin, h_and_cl), mon=optim_mon_mm)
-  assert res.success, "Initial hydrogen + ion MM minimization failed!"
+  #assert res.success, "Initial hydrogen + ion MM minimization failed!"
   trypsin.r = r
 
   # second pass moving all atoms
@@ -204,7 +205,7 @@ if not os.path.exists(mm_opt_xyz):
   #hdlc = HDLC(trypsin, autodlc=1, dlcoptions=dict(recalc=1, autobonds='total', autoangles='none', autodiheds='none', abseps=1e-14))
   # Note: all-atom MM opt (in Cartesians) was 3161 steps (~0.7s/step)
   res, r = optimize(trypsin, fn=tinker_EandG, fnargs=tinker_args, coords=XYZ(trypsin))
-  assert res.success, "Initial all-atom MM minimization failed!"
+  #assert res.success, "Initial all-atom MM minimization failed!"
   trypsin.r = r
 
   write_tinker_xyz(trypsin, mm_opt_xyz)
@@ -222,11 +223,13 @@ r_mmopt = trypsin.r  # save geom
 
 # QM atoms: sidechains of A His57, Asp102, Ser195 plus backbone of I between 5 and 6
 # - Kato paper includes CA of Ser195 (but not His57 or Asp102)
-##qmatoms = select_atoms(trypsin, pdb="A 57,102,195 ~C,N,CA,O,H,HA; I 5 CA,C,HA,O; I 6 CA,N,H,HA")
+fullqmatoms = select_atoms(trypsin, pdb="A 57,102,195 ~C,N,CA,O,H,HA; I 5 CA,C,HA,O; I 6 CA,N,H,HA")
 
 # tiny QM system (incl link atom it's methanol) for testing and debugging
 qmatoms = select_atoms(trypsin, pdb="A 195 ~C,N,CA,O,H,HA")
 #print("qmatoms net MM charge: %.3f" % sum([trypsin.atoms[ii].mmq for ii in qmatoms]))
+
+#~ qmatoms = fullqmatoms
 
 # other important subsets of atoms ... this should probably be in qmmm
 mmatoms = trypsin.listatoms(exclude=qmatoms)
@@ -265,15 +268,22 @@ for ii in qmatoms:
 # typically we'll want to use capopts.placement = 'rel' (variable Q1-cap bond length) with M1inactive=True
 # NWChem uses g = 0.709; for AMBER FF, g = 0.714 seems a bit closer to equilb C-H/C-C ratio
 qmmm = QMMM(mol=trypsin, qmatoms=qmatoms, moguess='prev', M1inactive=True,
+    qm_opts=Bunch(charge=-1, inp=gamess_trypsin1_inp),
     capopts=dict(basis='6-31G*', placement='rel', g_CH=0.714),
     chargeopts=dict(charge_atoms=charge_atoms, scaleM1=1.0, adjust='dipole', dipolecenter=0.75, dipolesep=0.5),
-    qm_inp=gamess_trypsin1_inp, mm_key=tinker_qmmm_key, savefiles=False)
+    mm_key=tinker_qmmm_key, savefiles=False)
+
+# cap for bonds other than C-C must be manually configured
+capI5_N_CA = qmmm.find_cap(select_atoms(trypsin, pdb="I 5 CA,N"))
+if capI5_N_CA:
+  capI5_N_CA.d0 = 1.09  # or capI5_N_CA.g = 0.752, based on CA-N bond dist of 1.449 from amber96.prm
 
 # visualization of nonbonded interactions (MM level only)
 #vis_nonbonded()
 
 ## for sanity checks
-qmmm.qm_inp = \
+qmmm.qm_opts.charge = 0
+qmmm.qm_opts.inp = \
 """ $CONTRL
    SCFTYP=RHF RUNTYP=GRADIENT ICHARG=0 MULT=1
    NPRINT=7 ISKPRP=1 MAXIT=100 $END
@@ -290,7 +300,7 @@ if not os.path.exists(gamess_init_log + "_000qm.log"):
 else:
   qmmm.prev_cclib = cclib_open(gamess_init_log + "_000qm.log")
 
-qmmm.qm_inp += " $GUESS GUESS=MOREAD $END\n"
+qmmm.qm_opts.inp += " $GUESS GUESS=MOREAD $END\n"
 
 # visualization to check link atoms and background charges
 #vis_qmmm_setup(qmmm)
@@ -298,16 +308,13 @@ qmmm.qm_inp += " $GUESS GUESS=MOREAD $END\n"
 #vis_qmmm_grad(qmmm, reuselogs=False)
 #vis_qmmm_dens()
 
-# start interactive
-import pdb; pdb.set_trace()
-
 # QMMM E and G sanity checks
 #from chem.test.qmmm_test import sanity_check
 #sanity_check(qmmm, dratoms=qmatoms + M1atoms + M2atoms)
 
 # create HDLC object for whole structure w/ DLC object for QM region and cartesians for MM region
 # - system has far too many atoms for single DLC object; could try per-residue DLCs instead of Cartesians
-dlcatoms = qmatoms # + M1atoms + M2atoms
+dlcatoms = fullqmatoms  #qmatoms # + M1atoms + M2atoms  -- DLC() will fail if we dlcatoms don't include the reaction coord "bond" atoms
 xyzatoms = trypsin.listatoms(exclude=dlcatoms)
 dlc_qm = DLC(trypsin, atoms=dlcatoms, bonds=[hg_og, og_c], autoxyzs='all', recalc=1)
 xyz_mm = Cartesian(trypsin, atoms=xyzatoms)
@@ -316,53 +323,59 @@ hdlc = HDLC(trypsin, [dlc_qm, xyz_mm])
 def optim_mon_qmmm(r, r0, E, G, Gc, timing):
   print("***ENERGY: {:.6f} H, RMS grad {:.6f} H/Ang {:.6f} (QM), {:.6f} (Q1), {:.6f} (MM), {:.6f} (M1), {:.6f} (M2)  H/Ang, RMSD: {:.3f} time: {:.3f}s".format(E, rms(G), rms(G[qmatoms]), rms(G[Q1atoms]), rms(G[mmatoms]), rms(G[M1atoms]), rms(G[M2atoms]), calc_RMSD(r0, r), timing['total']))
 
-# scipy.optimize.minimize callback is only passed r, so we'll have to stick with intercepting every call of
-#  objective fn, but discard any that increase energy
-E_hist = []
-G_hist = []
-r_hist = []
+if 0:
+  from chem.io import read_hdf5, write_hdf5
+  hdlc_opt1_h5 = "hdlc_opt1.h5"
+  if not os.path.exists(hdlc_opt1_h5):
+    # scipy.optimize.minimize callback is only passed r, so we'll have to stick with intercepting every call of
+    #  objective fn, but discard any that increase energy
+    E_hist = []
+    G_hist = []
+    r_hist = []
 
-def optim_mon_hist(r, r0, E, G, Gc, timing):
-  if not E_hist or E < E_hist[-1]:
-    E_hist.append(E)
-    G_hist.append(G)
-    r_hist.append(r)
-  print("***ENERGY: {:.6f} H, RMS grad {:.6f} H/Ang, RMSD: {:.6f} time: {:.3f}s".format(E, rms(G), calc_RMSD(r0, r), timing['total']))
+    def optim_mon_hist(r, r0, E, G, Gc, timing):
+      if not E_hist or E < E_hist[-1]:
+        E_hist.append(E)
+        G_hist.append(G)
+        r_hist.append(r)
+      print("***ENERGY: {:.6f} H, RMS grad {:.6f} H/Ang, RMSD: {:.6f} time: {:.3f}s".format(E, rms(G), calc_RMSD(r0, r), timing['total']))
 
+    res, r_qmmmopt = optimize(trypsin, fn=qmmm.EandG, coords=hdlc, r0=r_mmopt, mon=optim_mon_hist, ftol=2E-07)
+    write_hdf5(hdlc_opt1_h5, r_hist=r_hist, E_hist=E_hist, G_hist=G_hist)
+  else:
+    r_hist, E_hist, G_hist = read_hdf5(hdlc_opt1_h5, 'r_hist', 'E_hist', 'G_hist')
+    r_qmmmopt = r_hist[-1]
 
-# from chem.io import read_hdf5, write_hdf5
-# r_hist, E_hist, G_hist = read_hdf5(filename, 'r_hist', 'E_hist', 'G_hist')
-write_hdf5('hdlc_opt1.h5', r_hist=r_hist, E_hist=E_hist, G_hist=G_hist)
+  # Arguably, one important check is for significant motion of atoms far from QM region; perhaps we can compute a moment dr*(dist from center of QM site)
 
+  r_avgqm = np.mean(r_qmmmopt[qmatoms], axis=0)
+  moment = np.sqrt(np.sum(np.square(r_hist[-1] - r_hist[0]), axis=1))*np.sqrt(np.sum(np.square(r_qmmmopt - r_avgqm), axis=1))
+  moment_sort = np.argsort(moment)
+  print("\n".join([pdb_repr(trypsin, ii) for ii in moment_sort[-10:]]))
 
-# Arguably, one important check is for significant motion of atoms far from QM region; perhaps we can compute a moment dr*(dist from center of QM site)
+  # this visualization seems more useful than the above list ...
+  moment_vec = (r_hist[-1] - r_hist[0])*np.sqrt(np.sum(np.square(r_qmmmopt - r_avgqm), axis=1))[:,None]
 
-r_avgqm = np.mean(r_qmmmopt[qmatoms], axis=0)
-moment = np.sqrt(np.sum(np.square(r_hist[-1] - r_hist[0]), axis=1))*np.sqrt(np.sum(np.square(r_qmmmopt - r_avgqm), axis=1))
-moment_sort = np.argsort(moment)
-print("\n".join([pdb_repr(trypsin, ii) for ii in moment_sort[-10:]]))
-
-# this visualization seems more useful than the above list ...
-moment_vec = (r_hist[-1] - r_hist[0])*np.sqrt(np.sum(np.square(r_qmmmopt - r_avgqm), axis=1))[:,None]
-
-vis = Chemvis(Mol(trypsin, r_hist[0], [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, color_interp='ramp'), VisGeom(style='lines', sel='protein'), VisGeom(style='lines', sel='not protein'), VisGeom(style='licorice', radius=0.5, sel=qmatoms), VisVectors(moment_vec, colors=Color.lime) ]), fog=True).run()
-
-
-import matplotlib.pyplot as plt
-#plt.figure();
-plt.plot([rms(g) for g in G_hist], label="all");
-plt.plot([rms(g[qmatoms]) for g in G_hist], label="QM");
-plt.plot([rms(g[Q1atoms]) for g in G_hist], label="Q1");
-plt.plot([rms(g[M1atoms]) for g in G_hist], label="M1");
-plt.plot([rms(g[M2atoms]) for g in G_hist], label="M2");
-#plt.plot(E_hist);
-plt.legend()
-plt.xlabel("step");
-plt.ylabel("rms grad (Hartrees/Ang)");
-plt.show();
+  from chem.vis.chemvis import *
+  vis = Chemvis(Mol(trypsin, r_hist[0], [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, color_interp='ramp'), VisGeom(style='lines', sel='protein'), VisGeom(style='lines', sel='not protein'), VisGeom(style='licorice', radius=0.5, sel=qmatoms), VisVectors(moment_vec, colors=Color.lime) ]), fog=True).run()
 
 
+  import matplotlib.pyplot as plt
+  ##plt.figure()
+  #plt.plot([rms(g) for g in G_hist], label="all")
+  #plt.plot([rms(g[qmatoms]) for g in G_hist], label="QM")
+  #plt.plot([rms(g[Q1atoms]) for g in G_hist], label="Q1")
+  #plt.plot([rms(g[M1atoms]) for g in G_hist], label="M1")
+  #plt.plot([rms(g[M2atoms]) for g in G_hist], label="M2")
+  #plt.legend()
+  #plt.ylabel("rms grad (Hartrees/Ang)")
+  #plt.xlabel("step")
+  #plt.show()
 
+  plt.plot(E_hist)
+  plt.ylabel("energy (Hartrees)")
+  plt.xlabel("step")
+  plt.show()
 
 
 # initial QM/MM minimization
@@ -370,8 +383,8 @@ qmmm.prefix = tmpfolder + "/initialQMMM"
 qmmm_opt_xyz = folder + "/qmmm_optimized.xyz"
 qmmm.iternum = 0  # in case reuselogs was used ... need a better soln
 if not os.path.exists(qmmm_opt_xyz):
-  res, r = optimize(trypsin, fn=qmmm.EandG, coords=hdlc, mon=optim_mon_qmmm)  # ftol=2E-07
-  assert res.success, "Initial QM/MM minimization failed!"
+  res, r = optimize(trypsin, fn=qmmm.EandG, coords=hdlc, mon=optim_mon_qmmm, ftol=2E-07)
+  #assert res.success, "Initial QM/MM minimization failed!"
   trypsin.r = r
   write_tinker_xyz(trypsin, qmmm_opt_xyz)
 else:
@@ -386,9 +399,17 @@ dlc_qm.constraint(dlc_qm.bond(hg_og) - dlc_qm.bond(og_c))
 ## TODO: restarting from checkpoint
 
 # use array of rc values because, in general, we may not have evenly spaced values
-rcs = np.linspace(0, 2.0, 9)[1:]
-prev_rc = 0.0
+rcs = np.linspace(0, 2.0, 9)
+prev_rc = None
 results = []
+res_file = folder + '/results_step_1.py'
+if not os.path.exists(res_file):
+  with open(res_file, 'w') as f:
+    f.write('results = []\n')
+
+# start interactive
+import pdb; pdb.set_trace()
+
 for ii, rc in enumerate(rcs):
   # set reaction coord
   # starting from previous, optimized geom, incr HG_OG by delta_rc/2, decr OG_C by delta_rc/2, moving
@@ -396,39 +417,41 @@ for ii, rc in enumerate(rcs):
   if prev_rc is not None:
     trypsin.bond((og_195, hg_195), 0.5*(rc - prev_rc), rel=True, move_frag=False)
     trypsin.bond((og_195, c_5), -0.5*(rc - prev_rc), rel=True, move_frag=False)
-  qmmm.prefix = tmpfolder + "/step_1_rc_%.3f" % rc
-  res, r = optimize(trypsin, fn=qmmm.EandG, coords=hdlc, mon=optim_mon_qmmm)
-  if res.success:
+    qmmm.prefix = tmpfolder + "/step_1_rc_%.3f" % rc
+    res, r = optimize(trypsin, fn=qmmm.EandG, coords=hdlc, mon=optim_mon_qmmm, ftol=2E-07)
+  else:
+    r = trypsin.r
+  if prev_rc is None or res.success:
     # last call to qmmm.EandG() by optimization may not be for final optimized geometry, but
     #  call to qmmm.energy() here ensures that log files are for final geom
     trypsin.r = r
-    E, _ = qmmm.EandG(trypsin, dograd=False)
+    E = qmmm.EandG(trypsin, dograd=False)
     # should have some way to get this from qmmm ... maybe just qmmm.gen_filename('mm', 'input')
     mm_inp = "%s_%03dmm.xyz" % (qmmm.prefix, qmmm.iternum)
-    results.append( (rc,
-        dict(E=E, HG_OG=trypsin.dist(hg_195, og_195), OG_C=trypsin.dist(og_195, c_5), geom=mm_inp)) )
+    respt = (rc, dict(E=E, HG_OG=trypsin.dist(hg_195, og_195), OG_C=trypsin.dist(og_195, c_5), geom=mm_inp))
+    results.append(respt)
+    with open(res_file, 'a') as f:
+      f.write('results.append(%r)\n' % (respt,))
     print "Geom opt found energy %f Hartrees at reaction coord %.3f Ang" % (E, rc)
   else:
     print "Geom opt failed at reaction coord %.3f Ang!" % rc
   prev_rc = rc
 
-with open(folder + '/results_step_1.py', 'w') as f:
-  f.write('results = %r' % results)
 
 # so we can stick inactive code below ... I'd like to avoid indenting script so it can be pasted into interpreter
 raise Exception("quit script")
 
 ## Next: step 2 of reaction, then try NEB or similar instead of reaction coordinate and compare results
 # - also should do something like dimer method that yields transition state directly (to get accurate barrier)
-#  and consider what more detailed path is good for ... mostly just providing a qualitative descrption of mechanism?
+#  and consider what more detailed path is good for ... mostly just providing a qualitative description of mechanism?
 # Refs:
 # - https://gitlab.com/ase/ase/blob/master/ase/neb.py
 # - https://github.com/eljost/pysisyphus
 # - growing string method? https://github.com/ZimmermanGroup/molecularGSM
 # We'll probably want to make notes on optimization methods ... and write our own optimizer - see optimize.py
-# - could we use hessian for lone residues to approximate (spare/block diag) Hessian?
+# - could we use hessian for lone residues to approximate (sparse/block diag) Hessian?
 
-# - then try polarizable MM force; see https://github.com/kratman/LICHEM_QMMM and http://cascam.unt.edu/docs/CompChemMeet_07-19-17.pdf
+# - then try polarizable MM force field; see https://github.com/kratman/LICHEM_QMMM and http://cascam.unt.edu/docs/CompChemMeet_07-19-17.pdf
 
 ## Misc analysis
 

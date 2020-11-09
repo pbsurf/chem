@@ -2,9 +2,12 @@
 
 import time, math, threading  # threading for animation timer
 import numpy as np
+import OpenGL
+OpenGL.ERROR_CHECKING = False  # if our error check at end of frame fires, disable this to track down error
+#OpenGL.FULL_LOGGING = True  # set log level to DEBUG in chemvis.py to trace GL calls
+from OpenGL.GL import *
 from ..external.glfw import *
 from ..external.glfw import _glfw  # symbols starting with underscore not imported by *
-from OpenGL.GL import *
 from glutils import *
 
 
@@ -39,6 +42,7 @@ class GLFWViewer:
     window = glfwCreateWindow(640, 480, str.encode("Chemvis"), None, None)
     self.window = window
     glfwMakeContextCurrent(window)
+    #glfwSwapInterval(1)  # vsync
 
     # setup callbacks
     glfwSetWindowSizeCallback(window, self.on_resize)
@@ -66,6 +70,9 @@ class GLFWViewer:
       if self.should_repaint:
         t = time.time()
         self.should_repaint = self.render()
+        err = glGetError()
+        if err != GL_NO_ERROR:
+          print("OpenGL error 0x%08x - enable OpenGL.ERROR_CHECKING!\n" % err)
         glfwSwapBuffers(window)
         # glDraw* fns return before rendering is complete - need to wait until glfwSwapBuffers returns instead
         #print "Render time: {:.3f} ms".format(1000*(time.time() - t))
@@ -127,8 +134,8 @@ class GLFWViewer:
 
   def swap_depth_tex(self):
     if 'depth_2' not in self.fb_textures:
-      self.fb_textures['depth_2'] = \
-          create_texture(self.width, self.height, GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT)
+      self.fb_textures['depth_2'] = create_texture(self.width, self.height, GL_DEPTH_COMPONENT24,
+          GL_DEPTH_COMPONENT, GL_FLOAT, wrap=GL_CLAMP_TO_BORDER, border_value=(1.,1.,1.,1.))
     # swap depth textures
     self.fb_textures['depth'], self.fb_textures['depth_2'] = \
         self.fb_textures['depth_2'], self.fb_textures['depth']
@@ -136,6 +143,21 @@ class GLFWViewer:
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, self.fb_textures['depth'], 0)
     glClear(GL_DEPTH_BUFFER_BIT)
     return self.fb_textures['depth_2']
+
+
+  # workaround for a crazy bug that breaks volume rendering w/ updated vmware and/or host graphics drivers
+  def swap_color_tex(self):
+    if 'color_2' not in self.fb_textures:
+      self.fb_textures['color_2'] = create_texture(self.width, self.height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE)
+    self.fb_textures['color'], self.fb_textures['color_2'] = \
+        self.fb_textures['color_2'], self.fb_textures['color']
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.fb_textures['color'], 0)
+
+
+  def blit_framebuffer(self, destFBO=0):
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, destFBO)
+    glBlitFramebuffer(0, 0, self.width, self.height, 0, 0, self.width, self.height, GL_COLOR_BUFFER_BIT, GL_NEAREST)
+    glBindFramebuffer(GL_FRAMEBUFFER, destFBO)
 
 
   # For now, we will implement multipass rendering by having user pass a callback to viewer methods *_pass()
@@ -147,10 +169,6 @@ class GLFWViewer:
 
   def shadow_pass(self, callback):
     glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
-    # bind null texture to shadow texture unit - my understanding is that this gives defined behavior, whereas
-    #  not setting the sampler uniform does not
-    glActiveTexture(GL_TEXTURE0+self.shadow_tex_id)
-    glBindTexture(GL_TEXTURE_2D, 0)
     if self.fb_textures['shadow'] == 0:
       self.fb_textures['shadow'] = create_texture(self.width, self.height,
           GL_DEPTH_COMPONENT24, GL_DEPTH_COMPONENT, GL_FLOAT, mag_filter=GL_LINEAR, min_filter=GL_LINEAR,
@@ -159,6 +177,13 @@ class GLFWViewer:
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, self.fb_textures['shadow'], 0)
+    # previously we tried glBindTexture(..., 0) for shadow texture, which is not read during shadow pass, but
+    #  this doesn't work for some drivers, nor does binding depth texture (GL_TEXTURE_COMPARE may need to be
+    #  setup properly for texture bound to sampler2DShadow), so we'll bind the shadow texture
+    #  which works for now, but seems like it could also fail for some drivers
+    # ideal soln would be to use a separate shader for shadow pass that doesn't reference shadow texture
+    glActiveTexture(GL_TEXTURE0+self.shadow_tex_id)
+    glBindTexture(GL_TEXTURE_2D, self.fb_textures['shadow'])
     glDrawBuffer(GL_NONE)
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     self.curr_pass = 'shadow'
@@ -168,6 +193,7 @@ class GLFWViewer:
   def geom_pass(self, callback, to_screen=False):
     glBindFramebuffer(GL_FRAMEBUFFER, 0 if to_screen else self.fbo)
     if not to_screen:
+      self.swap_color_tex()  # workaround bug breaking volume rendering - see TODO
       glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, self.fb_textures['depth'], 0)
       glDrawBuffers(2, [GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT3])
     # just bind shadow texture once, don't rebind for every shader

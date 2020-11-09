@@ -58,13 +58,18 @@ def cclib_EandG(mol_cc, grad=True):
 
 # alternatives to hdf5 include Numpy format (.npy, .npz) and netCDF (based on HDF5, built-in support in scipy)
 # - h5py was installed for pyscf
-def write_hdf5(filename, **kwargs):
+def write_or_append_hdf5(filename, mode, **kwargs):
   """ write fields specified by `kwargs` to HDF5 file """
   import h5py
-  with h5py.File(filename, 'w') as h5f:
+  with h5py.File(filename, mode) as h5f:
     for k,v in kwargs.iteritems():
       h5f.create_dataset(k, data=v)
 
+def write_hdf5(filename, **kwargs):
+  write_or_append_hdf5(filename, 'w', **kwargs)
+
+def append_hdf5(filename, **kwargs):
+  write_or_append_hdf5(filename, 'a', **kwargs)
 
 def read_hdf5(filename, *args):
   """ return tuple of specified fields from HDF5 file """

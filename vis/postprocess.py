@@ -132,6 +132,9 @@ class PostprocessHost:
     glBindVertexArray(self.vao)
     glDrawArrays(GL_TRIANGLES, 0, 6)
     glBindVertexArray(0)
+    unbind_texture(0)
+    unbind_texture(1)
+    unbind_texture(2)
     glUseProgram(0)
 
 

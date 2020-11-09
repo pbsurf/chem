@@ -35,6 +35,7 @@ from ..molecule import *
 from ..io import cclib_EandG, cclib_open
 from ..io.gamess import gamess_cclib
 from ..io.nwchem import nwchem_cclib
+from ..io.pyscf import pyscf_EandG
 from ..io.tinker import tinker_EandG, read_tinker_energy, read_tinker_grad
 
 
@@ -45,8 +46,8 @@ class QMMM:
   savefiles = False
   iternum = 0
   reuselogs = False
+  qm_opts = {}
   mm_key = None
-  qm_inp = None
   qmatoms = None
   M1inactive = True  # make M1 atoms MM inactive, so e.g. M1-Q1 bond, Q2-Q1-M1 angle, etc. ignored
   chargeopts = {}  # dictionary of options to be passed to get_charge
@@ -55,7 +56,6 @@ class QMMM:
   moguess = None  # array of MO coeffs to be used for guess, or 'prev' to use prev_cclib.mocoeffs
   charge_cutoff = 0.5E-6  # charges below this cutoff are not included
   components = True  # save components to Ecomp, Gcomp?
-  write_basis = True  # write basis for every atom from atom.qmbasis and self.cap_basis?
   maxgradsum = 1.0E-7
 
 
@@ -75,34 +75,43 @@ class QMMM:
 
   def set_molecule(self, mol):
     self.mol = mol
+    if type(self.qmatoms) is str:
+      self.qmatoms = select_atoms(mol, self.qmatoms)
     self.caps = self.get_caps(mol, self.qmatoms, **self.capopts)
 
 
-  def EandG(self, mol, r=None, dograd=1, **kargs):
+  def EandG(self, mol=None, r=None, dograd=1, **kargs):
     """ single point QM/MM energy and gradient; additional arguments are used to set qmmm data members for
       duration of call to EandG() only
     """
-    assert id(mol) == id(self.mol), "QMMM.EandG() can only be used with self.mol"
-    r = mol.r if r is None else r
+    if mol is not None:
+      if mol.__class__ == Molecule:
+        assert id(mol) == id(self.mol), "QMMM.EandG() can only be used with self.mol"
+      else:
+        assert r is None, "Invalid Molecule object passed to QMMM.EandG()"
+        r = mol
+    r = self.mol.r if r is None else r
     oldvals = self.set(**kargs)
+    assert self.prefix, "No log filename prefix set!"
     Eqm, Emm, G, Gqm, Gmm = 0.0, 0.0, None, 0.0, 0.0
     self.Ecomp, self.Gcomp = ({}, {}) if self.components else (None, None)
     self.timing = {}
     t0 = time.time()
     # MM
-    if len(self.qmatoms) < mol.natoms - 1:
+    if len(self.qmatoms) < self.mol.natoms - 1:
       inactive = self.qmatoms  # qmmethod == 'lmo' and self.qmEatoms or self.qmatoms
       nocharge = self.embed == 'elec' and inactive or []
-      # note Gmm will always include all atoms in orginal order
-      Emm, Gmm = self.mm_EandG(mol, r, modcharge=nocharge, newcharges=self.mmconserveq,
+      # note Gmm will always include all atoms in original order
+      Emm, Gmm = self.mm_EandG(self.mol, r, modcharge=nocharge, newcharges=self.mmconserveq,
           inactive=inactive, expandinactive=self.M1inactive, grad=dograd, reuselog=self.reuselogs)
     t1 = time.time()
     # QM
     if len(self.qmatoms) > 0:
-      self.charges = self.get_charges(mol, r, self.qmatoms, **self.chargeopts) if self.embed == 'elec' else []
+      self.charges = self.get_charges(self.mol, r, self.qmatoms, **self.chargeopts) if self.embed == 'elec' else []
       self.update_caps(r, self.caps)
-      Eqm, Gqm = self.qm_EandG(mol, r, self.qmatoms, self.caps, self.charges,
-          grad=dograd, reuselog=self.reuselogs)
+      Eqm, Gqm = self.qm_EandG(self.mol, r, self.qmatoms, self.caps, self.charges,
+          grad=dograd, reuselog=self.reuselogs, **self.qm_opts)
+    E = Eqm + Emm
     # combine gradients
     if dograd:
       G = Gmm + Gqm
@@ -119,7 +128,7 @@ class QMMM:
     self.timing.update(MM=t1-t0, QM=time.time()-t1)
     # restore data members
     self.set(**oldvals)
-    return Eqm + Emm, G
+    return (E, G) if dograd else E
 
 
   # For now, cap atom dist can be 1.09 Ang (fixed; Methane C-H) or g*(Q1 - M1 dist) (g = 0.709 in NWChem)
@@ -163,6 +172,12 @@ class QMMM:
       Gmm = cap.g*np.eye(3) if cap.g else (cap.d0/rMQ)*np.eye(3) - (cap.d0/rMQ**3)*np.outer(vMQ, vMQ)
       cap.update(r=rcap, J=[(cap.M1, Gmm), (cap.Q1, np.eye(3) - Gmm)])
 
+
+  def find_cap(self, a1, a2=None):
+    a1, a2 = (a1,a2) if a2 is not None else a1
+    for cap in self.caps:
+      if (cap.Q1 == a1 and cap.M1 == a2) or (cap.Q1 == a2 and cap.M1 == a1):
+        return cap
 
   # MM frontier atom (M1) charge adjustment options:
   # - delete M1 charges; doesn't preserve total charge
@@ -308,7 +323,8 @@ class QMMM:
   #  energy if included (as with GAMESS, but not NWChem unless "geometry bqbq" is used)
   # - even if we wanted to zero all MM point charges instead, this would be wrong - most MM force fields do
   #  not include 1-2 and 1-3 electrostatic or vdW interactions (i.e., implicit in bond and angle terms)
-  def qm_EandG(self, mol, r, qmatoms, caps, charges, grad=True, reuselog=False):
+  def qm_EandG(self, mol, r, qmatoms, caps, charges, grad=True, reuselog=False,
+      prog='gamess', charge=0, inp=None, scffn=None, write_basis=True):
     """ caps, charges: array of atoms objects for cap atoms and point charges.  For caps and charges, we
       expect a J field holding list of tuples of the form (i, J), where i is the index of a real atom and J
       is the Jacobian wrt atom i.
@@ -325,24 +341,31 @@ class QMMM:
       title = "QMMM iter %d" % self.iternum
       t0 = time.time()
       moguess = self.prev_cclib.mocoeffs[0] if self.moguess == 'prev' and self.prev_cclib else self.moguess
-      mol_cc = gamess_cclib(mol, r, prefix, header=self.qm_inp, title=title,
-          qmatoms=qmatoms, charges=charges, caps=caps, moguess=moguess, write_basis=self.write_basis)
-      ## NWChem: a bit faster than GAMESS
-      # "noprint mulliken" necessary to prevent crash w/ BG charges; "print low" at global level also works
-      #~task = "\n".join(["scf", "  noprint mulliken", "end", "task scf gradient"])
-      #~mol_cc = nwchem_cclib(mol, r, prefix, task=task, header='title "%s"' % title,
-      #~    qmatoms=qmatoms, charges=charges, caps=caps, basis=self.write_basis)
+      if prog == 'pyscf':
+        Eqm, Gqm, scn = pyscf_EandG(mol, r, qmatoms=qmatoms, charges=charges, caps=caps, qm_charge=charge, scffn=scffn) #, moguess=moguess)
+        self.prev_pyscf = scn
+      elif prog == 'gamess':
+        mol_cc = gamess_cclib(mol, r, prefix, header=inp, title=title,
+            qmatoms=qmatoms, charges=charges, caps=caps, moguess=moguess, write_basis=write_basis)
+      elif prog == 'nwchem':
+        # NWChem a bit faster than GAMESS
+        # "noprint mulliken" necessary to prevent crash w/ BG charges; "print low" at global level also works
+        task = "\n".join(["scf", "  noprint mulliken", "end", "task scf gradient"])
+        mol_cc = nwchem_cclib(mol, r, prefix, task=task, header='title "%s"' % title,
+            qmatoms=qmatoms, charges=charges, caps=caps, basis=write_basis)
+      else:
+        assert 0, "Invalid QM program: " + prog
       self.timing['QM external'] = time.time() - t0
 
-    Eqm, Gqm = cclib_EandG(mol_cc)
-    # don't update prev_cclib unless cclib_EandG succeeds
-    self.prev_cclib = mol_cc
+    if mol_cc:
+      Eqm, Gqm = cclib_EandG(mol_cc)
+      # don't update prev_cclib unless cclib_EandG succeeds
+      self.prev_cclib = mol_cc
 
     # compute charge-charge E and G to remove from QM E and G, since these are already included in MM E and G
     #  Eqq = -\sum_{i,j>i} q_i*q_j/|r_i - r_j|;  Gqq_i = q_i*\sum_j q_j*(r_i - r_j)/|r_i - r_j|**3
-    # non-vectorized calculation was slow for large number of charges
-    Eqq = 0.0
-    if charges:
+    # non-vectorized calculation was slow for large number of charges. Note pyscf doesn't include charge-charge terms
+    if charges and prog != 'pyscf':
       rq = np.asarray([c.r for c in charges])
       mq = np.asarray([c.qmq for c in charges])
       # alternative - slightly faster for Eqq, but not useful (?) for Gqq:
@@ -355,6 +378,9 @@ class QMMM:
       qq = mq[:,None]*mq[None,:]  # broadcasting seems to be faster than np.outer()
       Eqq = -0.5*ANGSTROM_PER_BOHR*np.sum(qq*invdd)
       Gqq = ANGSTROM_PER_BOHR*np.sum((qq*(invdd**3))[:,:,None]*dr, axis=1)
+    else:
+      Eqq = 0.0
+      Gqq = np.zeros(len(charges))
 
     if self.Ecomp is not None:
       self.Ecomp.update(Eqm0=Eqm, Eqmcorr=Eqq)

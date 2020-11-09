@@ -48,7 +48,9 @@ def create_texture(width, height, int_fmt, fmt, data_type, data=None,
 
 def set_uniform(prog, uni, typ, value):
   location = glGetUniformLocation(prog, uni.encode('utf-8'))
-  if typ == '1f':
+  if location == -1:
+    pass  #print('glGetUniformLocation failed for ' + uni)  # not fatal - may fail for uniforms optimized out!
+  elif typ == '1f':
     glUniform1f(location, value)
   elif typ == '2f':
     glUniform2f(location, *value)
@@ -73,6 +75,11 @@ def set_sampler(prog, uni, id, tex, tex_type=GL_TEXTURE_2D):
   glActiveTexture(GL_TEXTURE0+id)
   glBindTexture(tex_type, tex)
   set_uniform(prog, uni, '1i', id)
+
+
+def unbind_texture(id, tex_type=GL_TEXTURE_2D):
+  glActiveTexture(GL_TEXTURE0+id)
+  glBindTexture(tex_type, 0)
 
 
 # PyOpenGL VBO object only copies data if it is bound explicitly, so doesn't play nice with VAO

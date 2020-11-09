@@ -477,28 +477,22 @@ class VolumeRenderer:
     set_uniform(self.shader, 'ray_steps', '1f', ray_steps)
     set_uniform(self.shader, 'viewport', '2f', [viewer.width, viewer.height])
 
-    # bind volume texture
-    glActiveTexture(GL_TEXTURE0)
-    glBindTexture(GL_TEXTURE_3D, vol_obj.stack_texture)
-    set_uniform(self.shader, 'texture_3d', '1i', 0)
-
-    # bind input depth texture
-    glActiveTexture(GL_TEXTURE0+1)
-    glBindTexture(GL_TEXTURE_2D, depth_in)
-    set_uniform(self.shader, 'depth_tex', '1i', 1)
+    # bind volume texture and input depth texture
+    set_sampler(self.shader, 'texture_3d', 0, vol_obj.stack_texture, GL_TEXTURE_3D)
+    set_sampler(self.shader, 'depth_tex', 1, depth_in)
 
     if self.method != 'iso':
       # bind colormap texture
-      glActiveTexture(GL_TEXTURE0+2)
-      glBindTexture(GL_TEXTURE_1D, vol_obj.cmap_texture)
-      set_uniform(self.shader, 'colormap', '1i', 2)
+      set_sampler(self.shader, 'colormap', 2, vol_obj.cmap_texture, GL_TEXTURE_1D)
       set_uniform(self.shader, 'absorption', '1f', vol_obj.absorption)
 
     glBindVertexArray(vol_obj.vao)
     glDrawElements(GL_TRIANGLES, len(vol_obj.indices), GL_UNSIGNED_INT, None)
-    # should we unbind textures? glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_3D, 0)
     glDisable(GL_CULL_FACE)  # return to default, disabled state
     glBindVertexArray(0)
+    unbind_texture(0, GL_TEXTURE_3D)
+    unbind_texture(1)
+    unbind_texture(2, GL_TEXTURE_1D)
     glUseProgram(0)
 
 

@@ -12,65 +12,8 @@ from glutils import *
 # - support for positional lights (perspective projection instead of orthographic)
 # - try PCSS for fancy soft-shadows
 
-
-class LightingShaderModule:
-  def __init__(self, light_dir=[0.0, 0.0, 1.0], shading='phong', ambient=0.05, shadow_strength=0.0,
-      fog_density=0.0, fog_start=0.0, fog_color=(0,0,0,255), fog_start_pivot=True,
-      outline_strength=0.0, outline_color=(0,0,0,255)):
-    """ light_dir should be direction in view_space - so a fixed direction will fix light relative to camera
-     if `fog_start_pivot`, fog_start is fixed relative to camera pivot, not camera position
-    """
-    self.light_dir = light_dir
-    self.ambient = ambient
-    self.fog_density = fog_density
-    self.fog_start = fog_start
-    self.fog_color = fog_color
-    self.fog_start_pivot = fog_start_pivot
-    self.outline_strength = outline_strength
-    self.outline_color = outline_color
-    self.shadow_strength = shadow_strength
-    self.shading_type = shading
-
-  def vs_code(self): return ""
-
-  def fs_code(self): return """
-uniform int shading_type;
-uniform vec3 light_dir;
-uniform float ambient;
-uniform vec4 fog_color;
-uniform float fog_start;
-uniform float fog_density;
-uniform float outline_strength;
-uniform vec4 outline_color;
-
-// shadow sampler samples from 4 closest pixels and does depth comparison for each
-uniform sampler2DShadow shadow_tex;
-uniform float shadow_strength;
-uniform mat4 view_to_shadow_matrix;
-uniform mat4 inv_view_matrix;
-uniform vec2 inv_viewport;
-
-const vec2 poissonDisk[16] = vec2[](
-   vec2( -0.94201624, -0.39906216 ),
-   vec2( 0.94558609, -0.76890725 ),
-   vec2( -0.094184101, -0.92938870 ),
-   vec2( 0.34495938, 0.29387760 ),
-   vec2( -0.91588581, 0.45771432 ),
-   vec2( -0.81544232, -0.87912464 ),
-   vec2( -0.38277543, 0.27676845 ),
-   vec2( 0.97484398, 0.75648379 ),
-   vec2( 0.44323325, -0.97511554 ),
-   vec2( 0.53742981, -0.47373420 ),
-   vec2( -0.26496911, -0.41893023 ),
-   vec2( 0.79197514, 0.19090188 ),
-   vec2( -0.24188840, 0.99706507 ),
-   vec2( -0.81409955, 0.91437590 ),
-   vec2( 0.19984126, 0.78641367 ),
-   vec2( 0.14383161, -0.14100790 )
-);
-
+OLD_VALUE_NOISE = """
 #define TWO_PI 6.28318530718
-
 
 // 3D value noise - see https://www.shadertoy.com/view/4sfGzS for ref and other types of noise
 // - notice that the basic idea is to assign random values to grid points (floor(x) + (0/1, 0/1, 0/1)) and
@@ -81,16 +24,14 @@ float hash(vec3 p)
   return fract( p.x*p.y*p.z*(p.x+p.y+p.z) );
 }
 
-/*
-vec3 hash( vec3 p ) // replace this by something better
-{
-	p = vec3( dot(p,vec3(127.1,311.7, 74.7)),
-			  dot(p,vec3(269.5,183.3,246.1)),
-			  dot(p,vec3(113.5,271.9,124.6)));
-
-	return -1.0 + 2.0*fract(sin(p)*43758.5453123);
-}
-*/
+//vec3 hash( vec3 p ) // replace this by something better
+//{
+//	p = vec3( dot(p,vec3(127.1,311.7, 74.7)),
+//			  dot(p,vec3(269.5,183.3,246.1)),
+//			  dot(p,vec3(113.5,271.9,124.6)));
+//
+//	return -1.0 + 2.0*fract(sin(p)*43758.5453123);
+//}
 
 float noise(vec3 x)
 {
@@ -117,6 +58,61 @@ float fbm(vec3 pos)
   return f;  // sqrt(1.2*f);
 }
 
+uniform mat4 inv_view_matrix;
+  // in shadow():
+
+  // random rotation of sampling points ... produces pixel-scale noise, doesn't look good!
+  //vec4 world_pos = inv_view_matrix*vec4(pos, 1.0);
+  //float angle = TWO_PI*fract(sin(mod(dot(world_pos.xyz, vec3(12.9898, 78.233, 50.351)), TWO_PI))*43758.5453);
+  //ivec2 seed = ivec2(floor(1000*(world_pos.xy + 2*worldpos.z)));
+  //float angle = mod( (((3 * seed.x) ^ (seed.y + seed.x * seed.y))) * 10, TWO_PI );
+  //
+  //float f = fbm(world_pos.xyz);
+  //
+  //float angle = TWO_PI*f;
+  //float c = cos(angle);
+  //float s = sin(angle);
+  //mat2 rot = mat2(c, -s, s, c);
+"""
+
+SHD_FRAG_SHADER = """
+uniform int shading_type;
+uniform vec3 light_dir;
+uniform float ambient;
+uniform vec4 fog_color;
+uniform float fog_start;
+uniform float fog_density;
+uniform float outline_strength;
+uniform vec4 outline_color;
+
+#ifdef NO_SHADOW
+float shadow(vec3 pos) { return 1.0; }
+#else
+// shadow sampler samples from 4 closest pixels and does depth comparison for each
+uniform sampler2DShadow shadow_tex;
+uniform float shadow_strength;
+uniform mat4 view_to_shadow_matrix;
+uniform vec2 inv_viewport;
+
+const vec2 poissonDisk[16] = vec2[](
+   vec2( -0.94201624, -0.39906216 ),
+   vec2( 0.94558609, -0.76890725 ),
+   vec2( -0.094184101, -0.92938870 ),
+   vec2( 0.34495938, 0.29387760 ),
+   vec2( -0.91588581, 0.45771432 ),
+   vec2( -0.81544232, -0.87912464 ),
+   vec2( -0.38277543, 0.27676845 ),
+   vec2( 0.97484398, 0.75648379 ),
+   vec2( 0.44323325, -0.97511554 ),
+   vec2( 0.53742981, -0.47373420 ),
+   vec2( -0.26496911, -0.41893023 ),
+   vec2( 0.79197514, 0.19090188 ),
+   vec2( -0.24188840, 0.99706507 ),
+   vec2( -0.81409955, 0.91437590 ),
+   vec2( 0.19984126, 0.78641367 ),
+   vec2( 0.14383161, -0.14100790 )
+);
+
 float shadow(vec3 pos)
 {
   if(shadow_strength <= 0.0)
@@ -131,19 +127,6 @@ float shadow(vec3 pos)
   //  illum = 0.5;
   //illum = 0.5 + 0.5*shadow2D(shadow_tex, vec3(texcoord_shadow.xy, texcoord_shadow.z - 0.005)).x;
 
-  // random rotation of sampling points ... produces pixel-scale noise, doesn't look good!
-  //vec4 world_pos = inv_view_matrix*vec4(pos, 1.0);
-  //float angle = TWO_PI*fract(sin(mod(dot(world_pos.xyz, vec3(12.9898, 78.233, 50.351)), TWO_PI))*43758.5453);
-  //ivec2 seed = ivec2(floor(1000*(world_pos.xy + 2*worldpos.z)));
-  //float angle = mod( (((3 * seed.x) ^ (seed.y + seed.x * seed.y))) * 10, TWO_PI );
-  //
-  //float f = fbm(world_pos.xyz);
-  //
-  //float angle = TWO_PI*f;
-  //float c = cos(angle);
-  //float s = sin(angle);
-  //mat2 rot = mat2(c, -s, s, c);
-
   // bias can be a fn of curvature to better handle shadow acne; note acos(diffuse) = angle(light_dir, normal)
   // another approach for bias is including a +z translation in shadow view space in view_to_shadow_matrix
   //float bias = clamp(0.005*tan(acos(diffuse)), 0, 0.01);
@@ -156,6 +139,7 @@ float shadow(vec3 pos)
   illum = (1.0 - shadow_strength) + shadow_strength*(illum/shadow_samples);
   return illum;
 }
+#endif // !NO_SHADOW
 
 vec3 blinn_phong(vec3 pos, vec3 normal, vec3 color)
 {
@@ -237,6 +221,29 @@ vec3 shading(vec3 pos, vec3 normal, vec3 color_in)
 }
     """
 
+class LightingShaderModule:
+  def __init__(self, light_dir=[0.0, 0.0, 1.0], shading='phong', ambient=0.05, shadow_strength=0.0,
+      fog_density=0.0, fog_start=0.0, fog_color=(0,0,0,255), fog_start_pivot=True,
+      outline_strength=0.0, outline_color=(0,0,0,255)):
+    """ light_dir should be direction in view_space - so a fixed direction will fix light relative to camera
+     if `fog_start_pivot`, fog_start is fixed relative to camera pivot, not camera position
+    """
+    self.light_dir = light_dir
+    self.ambient = ambient
+    self.fog_density = fog_density
+    self.fog_start = fog_start
+    self.fog_color = fog_color
+    self.fog_start_pivot = fog_start_pivot
+    self.outline_strength = outline_strength
+    self.outline_color = outline_color
+    self.shadow_strength = shadow_strength
+    self.shading_type = shading
+
+  def vs_code(self): return ""
+
+  # shader seems to break on some platforms if shadow2D() is used w/o an actual texture (not just 0) bound
+  def fs_code(self): return ("" if self.shadow_strength > 0 else "#define NO_SHADOW 1") + SHD_FRAG_SHADER
+
   def setup_shader(self, shader, viewer):
     """ assumes glUseProgram() has been called with a program containing our shader code """
     fog_start = self.fog_start
@@ -254,12 +261,13 @@ vec3 shading(vec3 pos, vec3 normal, vec3 color_in)
     set_uniform(shader, 'fog_density', '1f', self.fog_density)
     set_uniform(shader, 'outline_strength', '1f', self.outline_strength)
     set_uniform(shader, 'outline_color', '4f', gl_color(self.outline_color))
-    set_uniform(shader, 'shadow_strength', '1f', self.shadow_strength)
-    set_uniform(shader, 'shadow_tex', '1i', viewer.shadow_tex_id)
-    set_uniform(shader, 'inv_view_matrix', 'mat4fv', np.linalg.inv(viewer.view_matrix()))
-    set_uniform(shader, 'view_to_shadow_matrix', 'mat4fv', np.dot(viewer.shadow_proj_matrix(),
-        np.dot(viewer.shadow_view_matrix(), np.linalg.inv(viewer.view_matrix()))))
-    set_uniform(shader, 'inv_viewport', '2f', [1.0/viewer.width, 1.0/viewer.height])
+    if self.shadow_strength > 0:
+      set_uniform(shader, 'shadow_strength', '1f', self.shadow_strength)
+      set_uniform(shader, 'shadow_tex', '1i', viewer.shadow_tex_id)
+      #set_uniform(shader, 'inv_view_matrix', 'mat4fv', np.linalg.inv(viewer.view_matrix()))
+      set_uniform(shader, 'view_to_shadow_matrix', 'mat4fv', np.dot(viewer.shadow_proj_matrix(),
+          np.dot(viewer.shadow_view_matrix(), np.linalg.inv(viewer.view_matrix()))))
+      set_uniform(shader, 'inv_viewport', '2f', [1.0/viewer.width, 1.0/viewer.height])
 
 
   def rotate_light(self, dx, dy):

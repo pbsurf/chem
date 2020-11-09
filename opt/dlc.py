@@ -218,7 +218,7 @@ class DLC:
   #  all gradient history).
   # So, the calling code should perform the restart when update() fails: this is done by simply calling
   #  init() - active space and new DLCs will be recalculated using last good set of Cartesians
-  # Adaptive step size: used in DL-FIND, tried here at rev. 27 - if norm(dS) increases, reject step and
+  # Adaptive step size: used in DL-FIND, tried here r. 2016-12-01 - if norm(dS) increases, reject step and
   #  retry newX = last_good_X + trust*dS*A with trust *= 0.5; if norm(dS) decr and trust < 1, trust *= 1.25
   # examining (Q - prevQ)/np.dot(B, np.ravel(dX)) can be insightful for debugging convergence problems ...
   #  negative value in this array indicates update moved coord in opposite direction expected from gradient
@@ -270,6 +270,12 @@ class DLC:
     print("Warning: DLC to Cartesian conversion failed to converge; max_dS: %G, diff_dS: %G" \
         % ( max_dS, np.sqrt(np.mean(np.square( (dS - prev_dS)/S ))) ))
     return None
+
+
+  # maybe useful for, e.g., interpolation in DLC-TC
+  def fromxyz(self, X):
+    """ return DLCs for given Cartesians """
+    return np.dot(self.UT, self.get_Q(X))[len(self.C):]
 
 
   # TODO: can we think of a better name? r()? R()? .r via __getattr__?

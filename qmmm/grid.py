@@ -1,5 +1,5 @@
 import numpy as np
-from pyscf import gto
+from pyscf import gto, df
 from ..basics import ANGSTROM_PER_BOHR
 
 # calculating MOs and density on grid
@@ -28,9 +28,13 @@ def f_grid(f, extents=[(-1, -1, -1), (1, 1, 1)], samples=20, max_eval=None):
   return res
 
 
-def r_grid(extents, sample_density):
+def grid_shape(extents, sample_density):
+  return np.array((extents[1] - extents[0])*sample_density, dtype=np.int32)
+
+
+def r_grid(extents, sample_density=None, shape=None):
   """ return flattened grid of (x,y,z) values filling `extents` with `sample_density` """
-  shape = np.array((extents[1] - extents[0])*sample_density, dtype=np.int32)
+  shape = grid_shape(extents, sample_density) if shape is None else shape
   x = np.linspace(extents[0,0], extents[1,0], shape[0])
   y = np.linspace(extents[0,1], extents[1,1], shape[1])
   z = np.linspace(extents[0,2], extents[1,2], shape[2])
@@ -71,14 +75,8 @@ def pyscf_mo_grid(mf, extents, sample_density=10.0, mo_coeff=None, n_calc=None, 
     density = slice(0, homo+1)
 
   shape = [n_calc_mos,0,0,0]
-  shape[1:] = np.array((extents[1] - extents[0])*sample_density, dtype=np.int32)
-  # pyscf eval_gto requires coordinates in Bohr, and does not convert even if mol.unit == 'angstrom'
-  extents = extents/ANGSTROM_PER_BOHR
-  x = np.linspace(extents[0,0], extents[1,0], shape[1])
-  y = np.linspace(extents[0,1], extents[1,1], shape[2])
-  z = np.linspace(extents[0,2], extents[1,2], shape[3])
-  # broadcast_arrays is basically what meshgrid does
-  grid = np.array(np.broadcast_arrays(x[:,None,None], y[None,:,None], z[None,None,:])).reshape(3,-1).T
+  shape[1:] = grid_shape(extents, sample_density)
+  grid = r_grid(extents/ANGSTROM_PER_BOHR, shape=shape[1:])
   mo_grid = np.empty( (n_calc_mos, len(grid)) )
   ao_type = 'GTOval_cart' if mf.mol.cart else 'GTOval_sph'
   for start in range(0, len(grid), max_eval):
@@ -92,6 +90,24 @@ def pyscf_mo_grid(mf, extents, sample_density=10.0, mo_coeff=None, n_calc=None, 
     dens_grid = np.sum(occ_mo_grid*occ_mo_grid, axis=0)
     return mo_grid.reshape(shape), dens_grid.reshape(shape[1:])
   return mo_grid.reshape(shape)
+
+
+# ref: github.com/pyscf/pyscf/blob/master/pyscf/tools/cubegen.py
+def pyscf_esp_grid(mf, extents, sample_density=10.0):  #, max_memory=2**30):
+  """ calculate electrostatic potential from electrons for pyscf scf object `mf` over grid specified by
+    3D `extents` and `sample_density`
+  """
+  max_eval = 65536 #max_memory/mf.mol.nao_cart()/8  # nao_cart always >= nao_nr
+  dm = mf.make_rdm1()
+  shape = grid_shape(extents, sample_density)
+  grid = r_grid(extents/ANGSTROM_PER_BOHR, shape=shape)
+  esp_grid = np.empty(len(grid))
+  for start in range(0, len(grid), max_eval):
+    fakemol = gto.fakemol_for_charges(grid[start:start+max_eval])
+    ints = df.incore.aux_e2(mf.mol, fakemol)
+    esp_grid[start:start+max_eval] = np.einsum('ijp,ij->p', ints, dm)
+
+  return -2*esp_grid.reshape(shape)
 
 
 # untested; mainly for using pyscf to calculate MOs on grid for visualization

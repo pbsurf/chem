@@ -2,34 +2,8 @@ import time
 import numpy as np
 import scipy.optimize
 from ..molecule import calc_RMSD
-#from .dlc import DLC
-
-
-# Geom opt/gradient:
-# - see my personal notes; next steps are to try better Hessian estimates and full BFGS (vs. L-BFGS)
-# - maybe w/ a custom impl we can do things like use full Hessian for QM region but sparse for MM region?
-# - if we end up needing restartability, we can just save the last N values, gradients
-#  ourselves to feed back to optimizer
 
 # Internal coords: DLC seems to be the accepted approach
-# Optimizers (python unless otherwise noted):
-# - SciPy, LBFGS: Fortran, not restartable; BFGS: Python
-# - github.com/azag0/pyberny - succinct Python impl of Berny algorithm (geom opt from Gaussian)
-# - OpenOpt
-# - github.com/rpmuller/pistol - BFGS (optimize.py - earlier rev), GDIIS (need to use "controlled")
-# - ASE: LBFGS, global opt
-# - pDynamo: LBFGS, CG,...
-# - tsse: BFGS, CG, SD - very succinct (was at http://theory.cm.utexas.edu/code/ )
-# - MMTK: CG, SD
-# - PyQuante - SD
-# - nlpy: LBFGS, others
-# - DL-FIND - Fortran
-# TS search (python unless noted): can't use microit?
-# - methods: coordinate scan (constrained minimization), chain of states: NEB/string, dimer method,
-#  optim. e.g. P-RFO
-# - [ASE](https://gitlab.com/ase/ase/): NEB
-# - pDynamo: Baker/P-RFO (pCore); reaction paths (pMoleculeScripts)
-# - tsse: NEB, dimer method
 # Free energy methods
 # - Otte (Thiel) thesis: Python code for WHAM (umbrella sampling)
 
@@ -72,7 +46,7 @@ def optimize_mon(r, r0, E, G, Gc, timing):
 
 
 # default gtol, ftol just copied from scipy L-BFGS options
-def optimize(mol, fn, fnargs={}, coords=None, r0=None, gtol=1E-05, ftol=2E-09, mon=optimize_mon):
+def optimize(mol, fn, fnargs={}, coords=None, r0=None, gtol=1E-05, ftol=2E-09, optimizer=None, mon=optimize_mon, raiseonfail=True):
   """ Given `fn` accepting `mol`, r array, and additional args `fnargs` and returning energy and gradient of
     energy, find r which minimizes energy, starting from `mol.r`, or `r0` if given.  Internal coordinates,
     e.g., can use used by passing appropriate object for `coords`
@@ -80,10 +54,14 @@ def optimize(mol, fn, fnargs={}, coords=None, r0=None, gtol=1E-05, ftol=2E-09, m
   r0 = mol.r if r0 is None else r0
   coords = XYZ(mol) if coords is None else coords
   coords.init(r0)
+  updateok = [False]
+  res = None
 
   def objfn(S):
     t0 = time.time()
+    isnewS = np.any(coords.active() != S)
     if coords.update(S):
+      if isnewS: updateok[0] = True  # can't assign to outer vars!!! - fixed in python 3 w/ nonlocal keyboard
       r = coords.xyzs()
       t1 = time.time()
       E, G = fn(mol, r, **fnargs)
@@ -102,14 +80,23 @@ def optimize(mol, fn, fnargs={}, coords=None, r0=None, gtol=1E-05, ftol=2E-09, m
   print("optimize started at %s" % time.asctime())
   while True:
     try:
-      res = scipy.optimize.minimize(objfn, coords.active(),
-          jac=True, method='L-BFGS-B', options=dict(disp=True, gtol=gtol, ftol=ftol))
+      if optimizer is not None:
+        res = optimizer(objfn, coords.active(), gtol=gtol, ftol=ftol)
+      else:
+        res = scipy.optimize.minimize(objfn, coords.active(),
+            jac=True, method='L-BFGS-B', options=dict(disp=True, gtol=gtol, ftol=ftol))
       break
     except ValueError as e:
       if e.message != 'Coord breakdown':
         raise
+      if not updateok[0]:
+        print("Coord breakdown on first iteration - unable to continue")
+        break
+      updateok[0] = False
       coords.init()  # reinit with last good cartesians
 
-  if res.success:
+  if res and res.success:
     coords.update(res.x)
-  return res, coords.xyzs()
+  elif raiseonfail:
+    raise ValueError('optimize() failed')
+  return res, np.array(coords.xyzs())  # copy

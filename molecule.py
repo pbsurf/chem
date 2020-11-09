@@ -346,7 +346,7 @@ class Molecule:
     """ molecule.<attr> = val  """
     if attr == 'r':
       for ii in range(len(self.atoms)):
-        self.atoms[ii].r = val[ii]
+        self.atoms[ii].r = np.array(val[ii])  # copy
     #elif attr == 'bonds':
     #  self.set_bonds(val)
     elif attr in ['name', 'znuc', 'mmtype', 'mmq', 'mmconnect', 'resnum']:
@@ -535,14 +535,16 @@ def select_atoms(mol, sel=None, sort=None, pdb=None):
     pdbsels = re.sub(r'\s*,\s*', ',', pdb).split(';')  # remove spaces around commas
     for pdbsel in pdbsels:
       ss = re.split(r'\s*/?\s*', pdbsel.strip())  # split on space or /
-      assert len(ss) <= 3 or (len(ss) == 4 and not ss[0]), "Too many fields in " + pdbsel
+      ss = ss[1:] if not ss[0] else ss
+      if not ss: continue  # empty selection
+      assert len(ss) <= 3, "Too many fields in " + pdbsel
       # extend to contain all three fields; blank or * means match all
-      full_ss = (['']*(3-len(ss)) + ss) if ss[0] else (ss[1:] + ['']*(3-len(ss)+1))
+      full_ss = (['']*(3-len(ss)) + ss)  #if ss[0] else (ss[1:] + ['']*(3-len(ss)+1))
       atomsel = " and ".join(
           (f + " not in " + str(s[1:].split(','))) if s[0] == '~' else (f + " in " + str(s.split(','))) \
           for f, s in zip(['chain', 'pdb_resid', 'name'], full_ss) if s and s != '*')
       # should we join with 'or' and create a single selection string instead?
-      selected.extend(select_atoms(mol, atomsel))
+      selected.extend(select_atoms(mol, atomsel if atomsel else 'True'))  # '*' will give empty atomsel
   else:
     sel_fn = decode_atom_sel(sel)
     selected = [ii for ii, atom in enumerate(mol.atoms) if sel_fn is None or sel_fn(atom, mol, ii)]
@@ -671,7 +673,7 @@ def align_atoms(subject, ref, weights=1.0, sel=None):
   return apply_affine(alignment_matrix(subject, ref, weights), subject)
 
 
-# note that sel+sort may give different indices for mol and ref, so we taking a single list of indices would
+# note that sel+sort may give different indices for mol and ref, so taking a single list of indices would
 #  not be equivalent
 def align_mol(mol, ref, sel=None, sort='atom.resnum, atom.name'):
   if hasattr(ref, 'r'):
