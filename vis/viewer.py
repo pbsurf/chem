@@ -8,7 +8,7 @@ OpenGL.ERROR_CHECKING = False  # if our error check at end of frame fires, disab
 from OpenGL.GL import *
 from ..external.glfw import *
 from ..external.glfw import _glfw  # symbols starting with underscore not imported by *
-from glutils import *
+from .glutils import *
 
 
 class GLFWViewer:
@@ -83,13 +83,16 @@ class GLFWViewer:
         self.user_animate()
         self.should_repaint = True
     glfwHideWindow(window)
+    #glDeleteTextures(list(self.fb_textures.values()))
+    #glfwDestroyWindow(window)
+    #self.window = None
     print("GLFWViewer event loop stopped")
 
 
   # How to call this when exiting?  Do we need to?
   def terminate(self):
     if self.window is not None:
-      # GLFW docs warning against destroying window when context is current on another thread
+      # GLFW docs warn against destroying window when context is current on another thread
       glfwMakeContextCurrent(self.window)
       glfwTerminate()
       self.window = None
@@ -103,12 +106,12 @@ class GLFWViewer:
   def on_resize(self, window, width, height):
     glViewport(0, 0, width, height)
     self.camera.aspectratio = width/float(height)
-    print "Viewport resized to {} x {}".format(width, height)
+    print("Viewport resized to {} x {}".format(width, height))
     self.width, self.height = width, height
     if self.fbo is None:
       self.fbo = glGenFramebuffers(1)
     else:
-      glDeleteTextures(self.fb_textures.values())
+      glDeleteTextures(list(self.fb_textures.values()))  # values() is a dictionary view object in Python 3
     # create textures
     color_tex = create_texture(width, height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE)
     # GL_RGB, i.e., three-bytes written with gl_FragData[1].xyz = ... doesn't seem to work in VMware
@@ -285,8 +288,10 @@ class GLFWViewer:
 
 
   # note that window argument is passed when used as glfwSetWindowRefreshCallback
-  def repaint(self, window=None):
+  def repaint(self, window=None, wake=False):
     self.should_repaint = True
+    if wake:
+      _glfw.glfwPostEmptyEvent()
 
 
   # Do we need any locking for member access here?
@@ -315,7 +320,7 @@ class GLFWViewer:
 
   def decode_mods(self, mods):
     mods_dict = dict(Shift=GLFW_MOD_SHIFT, Ctrl=GLFW_MOD_CONTROL, Alt=GLFW_MOD_ALT)
-    return [k for k,v in mods_dict.iteritems() if mods & v]
+    return [k for k,v in mods_dict.items() if mods & v]
 
 
   # Note that key is a GLFW keycode - a bare letter key will actually correspond to the capital letter
@@ -327,7 +332,7 @@ class GLFWViewer:
     if key >= GLFW_KEY_LEFT_SHIFT and key <= GLFW_KEY_RIGHT_SUPER:
       return
     char = chr(key) if key >= 0 and key < 256 else chr(0)
-    if key == GLFW_KEY_ESCAPE:
+    if key == GLFW_KEY_ESCAPE or key == GLFW_KEY_F10:
       self.run_loop = False  #glfwSetWindowShouldClose(window, 1)
     elif char in 'WASD':
       mag = 10 if mods & GLFW_MOD_SHIFT else 1
@@ -364,6 +369,9 @@ class GLFWViewer:
       self.mouse_dist_sq = 0
       if mods == 0:
         self.dragging = 'zoom' if button == GLFW_MOUSE_BUTTON_RIGHT else 'orbit'
+      elif mods & GLFW_MOD_CONTROL and self.user_on_drag:
+        self.dragging = 'user' + ('_shift' if mods & GLFW_MOD_SHIFT else '') \
+            + ('_r' if button == GLFW_MOUSE_BUTTON_RIGHT else '_l')
       elif mods & GLFW_MOD_SHIFT:
         self.dragging = 'pan' if button == GLFW_MOUSE_BUTTON_RIGHT else 'spin'
       elif mods & GLFW_MOD_ALT:
@@ -390,6 +398,8 @@ class GLFWViewer:
     elif self.dragging == 'light':
       ## TODO: obviously, we need to do something better than accessing a global class variable
       RendererConfig.shading.rotate_light(dx, dy)
+    elif self.dragging[0:4] == 'user':
+      self.user_on_drag(dx, dy, self.dragging)
     self.last_mouse_x, self.last_mouse_y = x,y
     self.repaint()
 

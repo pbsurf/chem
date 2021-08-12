@@ -31,7 +31,7 @@ from chem.data.test_molecules import water, ethanol, C2H3F
 
 # Refs:
 # - https://github.com/leeping/geomeTRIC
-# - https://aip.scitation.org/doi/suppl/10.1063/1.4952956
+# - 10.1063/1.4952956
 
 # - Lagrange multipliers to handle constraints not initially satisfied?  See http://www.q-chem.com/qchem-website/manual/qchem50_manual/sect0043.html
 
@@ -44,6 +44,8 @@ from chem.data.test_molecules import water, ethanol, C2H3F
 # - doesn't recover grad as A*g_xyz is least squares optimal soln to Ba*g_dlc
 
 # NOTE: HDLC with total connection (trypsin) - some failures returning to initial coords w/ abseps = 1E-15; 1E-14 is OK (consider making that the new default)
+
+# Should be able to prevent rotations while allowing translations by constraining, e.g., r_C - r_CA and r_N - r_CA (as vectors, not bond lengths!)
 
 # Old:
 
@@ -114,6 +116,22 @@ def centroid(r, grad=False):
   zeros = np.zeros(len(r))
   G = [np.column_stack((ones,zeros,zeros)), np.column_stack((zeros,ones,zeros)), np.column_stack((zeros,zeros,ones))]
   return (centroid, G) if grad else centroid
+
+
+# exponential map (axis-angle) rotation
+class ExpMapRot:
+
+  def init(self, r):
+    self.r0 = r
+
+  def __call__(self, r, grad=False):
+    # Rotation matrix to axis-angle (expmap) ref: https://arxiv.org/pdf/1312.0788.pdf
+    M = alignment_matrix(r, self.r0)
+    R = M[:3,:3]
+    ang = np.arccos((np.trace(R) - 1)/2)
+    v = np.array([R[2,1] - R[1,2], R[0,2] - R[2,0], R[1,0] - R[0,1]])*ang/(2*np.sin(ang))
+    #v = np.array([R[2,1] - R[1,2], R[0,2] - R[2,0], R[1,0] - R[0,1]])/np.sqrt(2 - (np.trace(R) - 1)**2)
+    return expmap_rot(v, grad)
 
 
 # Rotation matrix: (a1,a2,a3 assumed to be small)
@@ -255,7 +273,7 @@ def test_1():
 
 def test_planar():
   print("Testing DLC for planar molecule...")
-  nh3 = Molecule(r_array=[[0,0,0], [1,0,0], [0,1,0], [-1/np.sqrt(2),-1/np.sqrt(2),0]], z_array=[7,1,1,1])
+  nh3 = Molecule(r=[[0,0,0], [1,0,0], [0,1,0], [-1/np.sqrt(2),-1/np.sqrt(2),0]], znuc=[7,1,1,1])
   nh3.set_bonds(guess_bonds(nh3.r, nh3.znuc))
   print("This should fail for planar molecule:")
   dlc = DLC(nh3).init()
@@ -290,7 +308,79 @@ def all_tests():
   test_mol_box()
 
 
-if __name__ == '__main__':
+def dlc_test_3(dlc, nit=100, scale=0.1, mask=None):
+  S0 = dlc.active()
+  r0 = dlc.xyzs()
+  for ii in range(nit):
+    # compute random cartesian displacement and use gradfromxyz to convert to perturbation of S
+    dr = scale*(np.random.rand(*np.shape(r0)) - 0.5)
+    dS = dlc.gradfromxyz(dr)
+    if mask:
+      dS = setitem(np.zeros_like(dS), mask, dS[mask])
+    if not dlc.update(S0 + dS):
+      print("DLC update (S0 + dS) failed (iteration %d)" % ii)
+      break
+    #if not np.allclose(dlc.xyzs(), r0 + dr, rtol=1E-05, atol=1E-08):  -- always fails
+    if not dlc.update(S0):
+      print("DLC update (S0) failed (iteration %d)" % ii)
+      break
+
+
+# How to move only diheds?
+# - Redundant doesn't work if Cartesians included (but seems to otherwise)
+# - DLC (incl Cartesians) + constraints on fixed atoms, bonds, and angles seems to work
+# - other option is non-redundant internals (Z-matrix)
+from chem.test.common import quick_load
+if 0:
+  arg1 = quick_load('ARG1.pdb')
+  active = select_atoms(arg1, 'sidechain and name != "HA"')
+  fzn = arg1.listatoms(exclude=active)
+  fznxyz = flatten([[3*ii, 3*ii+1, 3*ii+2] for ii in fzn])
+  bonds, angles, diheds = arg1.get_internals(active=active, inclM1=True)
+  dlc = DLC(arg1, xyzs=fznxyz, bonds=bonds, angles=angles, diheds=diheds, autobonds='none', autoangles='none', autodiheds='none', recalc=1)
+  dlc.constrain([[ii] for ii in fzn])
+  dlc.constrain(bonds)
+  #indepangles = [(1, 8, 9), (1, 8, 15), (1, 8, 16), (7, 1, 0), (7, 1, 2), (7, 1, 8), (8, 1, 0), (8, 1, 2), (8, 9, 10), (8, 9, 17), (8, 9, 18), (9, 8, 15), (9, 8, 16), (9, 10, 11), (9, 10, 19), (9, 10, 20), (10, 9, 17), (10, 9, 18), (10, 11, 12), (10, 11, 21), (11, 10, 19), (11, 10, 20), (11, 12, 13), (11, 12, 14), (12, 11, 21), (12, 13, 22), (12, 13, 23), (12, 14, 24), (12, 14, 25), (22, 13, 23), (24, 14, 25)]
+  dlc.constrain(angles)
+  #pdb.run('dlc.init()')
+  import pdb; pdb.set_trace()
+  dlc.init()
+  Q0 = dlc.Q
+  S0 = dlc.active()
+  dr = 0.1*(np.random.rand(*np.shape(arg1.r)) - 0.5)
+  dS = dlc.gradfromxyz(dr)
+  dlc.update(S0 + dS)
+  Q1 = dlc.Q
+
+
+if 1:
+  arg1 = quick_load('ARG1.pdb')
+  active = select_atoms(arg1, 'sidechain and name != "HA"')
+  fzn = arg1.listatoms(exclude=active)
+  fznxyz = flatten([[3*ii, 3*ii+1, 3*ii+2] for ii in fzn])
+  bonds, angles, diheds = arg1.get_internals(active=active, inclM1=True)
+  redun = Redundant(arg1, xyzs=fznxyz, bonds=bonds, angles=angles, diheds=diheds, autobonds='none', autoangles='none', autodiheds='none', diffeps=1E-13, recalc=1)
+
+  #redun = Redundant(arg1, diffeps=1E-13, recalc=1)
+  dihedstart = len(redun.bonds) + len(redun.angles)
+  dihedidx = range(dihedstart, dihedstart + len(redun.diheds))
+  redun.init()
+  import pdb; pdb.set_trace()
+  dlc_test_3(redun, mask=dihedidx)
+
+  S0 = redun.active()
+  dr = 0.1*(np.random.rand(*np.shape(arg1.r)) - 0.5)
+  dS = redun.gradfromxyz(dr)
+  #A = redun.calc_A(redun.B)
+  #proj = np.dot(redun.B, A.T)
+  #dS = np.dot(proj, dS0)
+  #dSdihed = setitem(np.zeros_like(S0), dihedidx, dS[dihedidx])
+  redun.update(S0 + dS)
+
+
+
+
+if 0:  #__name__ == '__main__':
   #np.set_printoptions(suppress=True)
   #np.set_printoptions(suppress=True, precision=4, linewidth=150)
 

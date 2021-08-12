@@ -1,8 +1,8 @@
 ## Classes for post processing/final output pass
 import numpy as np
 from OpenGL.GL import *
-from glutils import *
-from color import *
+from .glutils import *
+from .color import *
 
 ## TODO
 

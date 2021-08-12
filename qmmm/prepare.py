@@ -1,4 +1,6 @@
 import numpy as np
+from scipy.spatial.ckdtree import cKDTree
+from ..molecule import *
 from ..data.pdb_bonds import PDB_PROTEIN
 from .grid import r_grid, esp_grid
 
@@ -70,14 +72,55 @@ def geometry_check(mol, min_angle=np.pi/2):
 
 # Tinker's build solvent box function (xyzedit option 19) places molecules at random positions w/ random
 #  orientations; no effort to avoid clashes ... so we can just do it ourselves!
-def solvent_box(mol, ncopies, extents):
+def solvent_box(mol, ncopies, extents, overfill=1.5):
+  """ return Molecule with `ncopies` copies of `mol` in box specified by sides or bounds `extents`
+    if `overfill` > 1, overfill*ncopies copies of mol are placed, then (overfill-1)*ncopies copies closest to
+    neighbors are removed
+  """
   extents = np.asarray([extents]*3 if np.isscalar(extents) else extents)
   extents = np.array([-0.5*extents, 0.5*extents]) if np.size(extents) == 3 else extents
   r0 = mol.r - center_of_mass(mol)
   solvent = Molecule()
-  for ii in range(ncopies):
-    r = np.dot(random_rotation(), r0) + extents[0] + (extents[1] - extents[0])*np.random.random(3)
-    solvent.append_atoms(mol, r)
+  rcs = (extents[1] - extents[0])*np.random.rand(int(overfill*ncopies), 3) + extents[0]  # centers
+  if overfill > 1:
+    pairs = np.triu_indices(len(rcs), 1)
+    dr = np.abs((rcs[:,None,:] - rcs[None,:,:])[pairs])  # calc distance w/ PBCs
+    dists = np.linalg.norm(np.min([dr, np.abs(dr - (extents[1] - extents[0]))], axis=0), axis=1)
+    rmpairs = np.transpose(pairs)[np.argsort(dists)]
+    nkeep = len(rcs)
+    keep = np.ones(nkeep, dtype=bool)
+    for a,b in rmpairs:
+      if keep[a] and keep[b]:
+        keep[a] = False
+        nkeep -= 1
+        if nkeep == ncopies:
+          break
+    rcs = rcs[keep]
+  for rc in rcs:
+    solvent.append_atoms(mol, r=np.dot(r0, random_rotation()) + rc)
+
+  return solvent
+
+
+def water_box(sides, mmtypes=None):
+  from ..data import test_molecules
+  from ..io import load_molecule
+  tip3p = load_molecule(test_molecules.water_tip3p_xyz, center=True, residue='HOH')
+  if mmtypes is not None:
+    tip3p.mmtype = mmtypes  #[2001, 2002, 2002] -- Tinker Amber types
+  # for water
+  molar_mass = 18.01488 # amu == g/mol ... just sum of atomic weights
+  density = 0.9982 # g/cm^3 at 20C
+  sides = np.array([sides]*3 if np.isscalar(sides) else sides)
+  vol_cm3 = np.prod(sides)*1E-24  # 1 Ang^3 = 1E-24 cm^3
+  nwaters = AVOGADRO*density*vol_cm3/molar_mass
+  solvent = solvent_box(tip3p, int(round(nwaters)), sides)  #overfill=3.0 might work better
+  solvent.pbcbox = sides
+  #~water_cube_side = 1E8*(molar_mass/(AVOGADRO*density))**(1/3.0)  # in Ang
+  #~# Tinker periodic box seems to be centered at origin
+  #~nwaters_side = np.ceil(np.array([sides]*3 if np.isscalar(sides) else sides)/water_cube_side)
+  #~solvent = tile_mol(tip3p, water_cube_side, nwaters_side, rand_rot=True, rand_offset=0.2*water_cube_side)
+  #~solvent.pbcbox = nwaters_side*water_cube_side
   return solvent
 
 
@@ -85,15 +128,14 @@ def solvent_box(mol, ncopies, extents):
 # solvent molecules are assumed to be placed at random independent positions, so that we can just replace
 #  first N solvent molecules with ions to neutralize system (if ion_p and/or ion_n are provided)
 # - alternatively, we could just choose solvent molecules for replacement randomly
-def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None):
-  from scipy.spatial.ckdtree import cKDTree
+def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None, solute_res=None):
   kd = cKDTree(mol.r)
   # could try a prefiltering step using mol.extents
   dists, locs = kd.query(solvent.r, distance_upper_bound=d)
   remove = set([solvent.atoms[ii].resnum for ii,dist in enumerate(dists) if dist < d])
 
-  solvated = Molecule()
-  solvated.append_atoms(mol)
+  solvated = Molecule(pbcbox=solvent.pbcbox)  #, header=mol.header + " in " + solvent.header)
+  solvated.append_atoms(mol, residue=solute_res)
   if ion_p or ion_n:
     # solvent assumed to be neutral for now
     net_charge = round(np.sum(mol.mmq))  # + np.sum(solvent.mmq)
@@ -108,7 +150,7 @@ def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None):
         net_charge += ion.mmq
 
   retain = [ii for ii in range(len(solvent.residues)) if ii not in remove]
-  solvated.append_atoms(extract_atoms(solvent, resnums=retain))
+  solvated.append_atoms(solvent.extract_atoms(resnums=retain))
   return solvated
 
 
@@ -119,7 +161,6 @@ def neutralize(mol, d=3.0, ion_p=None, ion_n=None, grid_density=0.5, chain='X'):
    `grid_density`) with largest electrostatic potential.  Intended for systems in vacuum or implicit
     solvent; should be followed by MM minimization
   """
-  from scipy.spatial.ckdtree import cKDTree
   extents = mol.extents(pad=2.0/grid_density)
   grid = r_grid(extents, grid_density)
   kd = cKDTree(mol.r)

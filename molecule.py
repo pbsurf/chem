@@ -4,8 +4,6 @@ from .basics import *
 from .data.elements import ELEMENTS
 from .data.pdb_bonds import PDB_STANDARD, PDB_PROTEIN
 
-T = np.transpose  # should replace T(x) with x.T
-
 
 # To consider:
 # 1. Would it be better to store molecule attributes as arrays of arrays, and have __getattr__/__setattr__ for
@@ -40,7 +38,7 @@ class Atom:
     self.mmq = mmq
     self.mmconnect = mmconnect if mmconnect is not None else []
     self.resnum = resnum
-    for key,val in kwargs.iteritems():
+    for key,val in kwargs.items():
       setattr(self, key, val)
 
   def __repr__(self):
@@ -68,14 +66,25 @@ class Residue:
 ## Molecule class
 
 class Molecule:
+  # class variables
+  _atomattrs = ['name', 'znuc', 'mmtype', 'mmq', 'mmconnect', 'resnum', 'lj_eps', 'lj_r0']
+  _resattrs = ['resname', 'resatoms', 'pdb_num', 'chain', 'het']
 
-  def __init__(self, atoms=None, residues=None, r_array=None, z_array=None, bonds=None):
-    if r_array is not None and z_array is not None and atoms is None:
-      atoms = [Atom(r=r, znuc=z) for r,z in zip(r_array, z_array)]
+  def __init__(self, atoms=None, residues=None, r=None, znuc=None, bonds=None, pbcbox=None, header=None):
+    if r is not None and znuc is not None and atoms is None:
+      atoms = [Atom(r=ra, znuc=za) for ra,za in zip(r, znuc)]
+    elif atoms is not None and atoms.__class__ == Molecule:
+      residues = copy.deepcopy(atoms.residues) if residues is None else residues
+      atoms = copy.deepcopy(atoms.atoms)
+      pbcbox = copy.deepcopy(atoms.pbcbox)
     self.atoms = atoms if atoms is not None else []
     self.residues = residues if residues is not None else []
+    if r is not None and znuc is None:
+      self.r = r
     if bonds is not None:
       self.set_bonds(bonds)
+    self.pbcbox = pbcbox  # 3 dimensions for PBC box centered at origin
+    self.header = header
 
 
   def listatoms(self, exclude=None):
@@ -103,35 +112,93 @@ class Molecule:
 
   def append_atoms(self, atoms, r=None, residue=None):
     """ append Molecule, list of atoms, or single atom in `atoms` to this Molecule; positions passed in `r`, if
-      provided, will replace those from `atoms`.  Residue object or name can be passed in `residue` for Atom(s)
+      provided, will replace those from `atoms`.  Residue object or name can be passed in `residue` for Atom(s),
+      or int to add atoms to existing residue
     """
     offset = len(self.atoms)
-    res_offset = len(self.residues)
+    res_offset = None
     resnum = None
     if hasattr(atoms, 'atoms'):
       # molecule
       mol, atoms = atoms, atoms.atoms
-      self.residues.extend(
-          [setattrs(copy.copy(res), atoms=[ii + offset for ii in res.atoms]) for res in mol.residues])
+      if residue is None:
+        res_offset = len(self.residues)
+        self.residues.extend(
+            [setattrs(copy.copy(res), atoms=[ii + offset for ii in res.atoms]) for res in mol.residues])
     else:
       if hasattr(atoms, 'name'):
         # single atom
         residue = atoms.name if residue is None else residue
         atoms = [atoms]
-      # list of atoms
-      if residue is not None:
-        residue = Residue(name=residue, het=True) if type(residue) is str else copy.copy(residue)
-        residue.atoms = range(offset, offset + len(atoms))
-        self.residues.append(residue)
-        resnum = res_offset
+    if type(residue) is int:
+      resnum = residue
+      self.residues[resnum].atoms.extend(range(offset, offset + len(atoms)))
+    elif residue is not None:
+      residue = Residue(name=residue, het=True) if type(residue) is str else copy.copy(residue)
+      residue.atoms = range(offset, offset + len(atoms))
+      resnum = len(self.residues)
+      self.residues.append(residue)
     # reshape to provide error check and handle single atom case
     r = [a.r for a in atoms] if r is None else np.reshape(r, (len(atoms),3))
     self.atoms.extend([setattrs(copy.copy(a), r=r[ii], mmconnect=[jj + offset for jj in a.mmconnect],
-        resnum=(a.resnum + res_offset if a.resnum is not None else resnum)) for ii,a in enumerate(atoms)])
+        resnum=(a.resnum + res_offset if a.resnum is not None and res_offset is not None else resnum))
+        for ii,a in enumerate(atoms)])
+    return range(offset, len(self.atoms))  # list of appended atoms
+
+
+  def extract_atoms(self, sel=None, resnums=None):
+    """ return a new Molecule containing atoms specified by `sel` or residue numbers `resnums` """
+    if sel is not None:
+      atom_idxs = select_atoms(self, sel) if callable(sel) or type(sel) is str else sel
+      resnums = sorted(list(set([getattr(self.atoms[ii], 'resnum', None) for ii in atom_idxs])))
+    elif resnums is not None:
+      resnums = [resnums] if type(resnums) is int else resnums
+      atom_idxs = [ii for resnum in resnums for ii in self.residues[resnum].atoms]
+
+    resnum_map = dict(zip(resnums, range(len(resnums))))
+    idx_map = dict(zip(atom_idxs, range(len(atom_idxs))))
+    atoms = [setattrs(copy.copy(self.atoms[ii]), resnum=resnum_map.get(self.atoms[ii].resnum, None),
+        mmconnect=[idx_map[ii] for ii in self.atoms[ii].mmconnect if ii in idx_map]) for ii in atom_idxs]
+    residues = [setattrs(copy.copy(self.residues[ii]),
+        atoms=[idx_map[ii] for ii in self.residues[ii].atoms if ii in idx_map]) for ii in resnums]
+    return Molecule(atoms, residues)
+
+
+  def remove_atoms(self, sel):
+    """ remove atoms specified by `sel` (in-place) """
+    idxs = select_atoms(self, sel) if callable(sel) or type(sel) is str else sel
+    # process indices from largest to smallest index so it remains valid
+    idxs.sort(reverse=True)
+    for ii in idxs:
+      for atom in self.atoms:
+        atom.mmconnect = [a - 1 if a > ii else a for a in atom.mmconnect if a != ii]
+      for residue in self.residues:
+        residue.atoms = [a - 1 if a > ii else a for a in residue.atoms if a != ii]
+      # remove residue if now empty
+      resnum = self.atoms[ii].resnum
+      del self.atoms[ii]
+      if resnum is not None and not self.residues[resnum].atoms:
+        for jj in range(ii+1, len(self.residues)):
+          for a in self.residues[jj].atoms:
+            self.atoms[a].resnum -= 1
+        del self.residues[resnum]
+
+    return self
+
+
+  def set_residue(self, name):
+    self.residues = [Residue(name=name, atoms=self.listatoms(), het=True)]
+    self.resnum = [0]*len(self.atoms)
+    return self
+
+
+  def select(self, *args, **kwargs):
+    return select_atoms(self, *args, **kwargs)
 
 
   def get_bonded(self, qmatoms):
     """ get atoms directly bonded to `qmatoms`; useful for getting frontier MM atoms to set them inactive """
+    qmatoms = [qmatoms] if type(qmatoms) is int else qmatoms
     return list(set([jj for ii in qmatoms for jj in self.atoms[ii].mmconnect if jj not in qmatoms]))
 
 
@@ -182,22 +249,23 @@ class Molecule:
       return [ (ii, jj) for ii,a in self.enumatoms() for jj in a.mmconnect if jj > ii ]
 
 
-  def get_internals(self, active=None):
-    """ returns:
-    bonds, angles, diheds - lists of atom number pairs, triples, quads (tuples)
-    if list of active atoms is given, all other atoms are ignored
+  def get_internals(self, active=None, inclM1=False):
+    """ returns bonds, angles, diheds - lists of atom number pairs, triples, quads (tuples)
+    if list of active atoms is given, all other atoms are ignored (but angles and diheds involving atoms
+    bonded to active atoms are included if inclM1 is True)
     """
     A = self.atoms  # alias
     active = frozenset(active or self.listatoms())
+    inclfn = (lambda ii, kk: kk > ii or kk not in active) if inclM1 else (lambda ii, kk: kk > ii and kk in active)
     bonds = [ (ii, jj) for ii in active
       for jj in A[ii].mmconnect if jj > ii and jj in active ]
     angles = [ (ii, jj, kk) for ii in active
       for jj in A[ii].mmconnect if jj in active
-      for kk in A[jj].mmconnect if kk > ii and kk in active ]
+      for kk in A[jj].mmconnect if inclfn(ii, kk) ]  #kk > ii and kk in active ]
     diheds = [ (ii, jj, kk, ll) for ii in active
       for jj in A[ii].mmconnect if jj in active
       for kk in A[jj].mmconnect if kk != ii and kk in active
-      for ll in A[kk].mmconnect if ll != jj and ll > ii and ll in active ]
+      for ll in A[kk].mmconnect if ll != jj and inclfn(ii, ll) ]  #ll > ii and ll in active ]
     # angles and dihed are generated from bonds
     return bonds, angles, diheds
 
@@ -278,7 +346,7 @@ class Molecule:
     if newdeg is not None:
       f1, f2 = self.partition_mol(angle[1], angle[2])
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
-      rotmat = rotation_matrix(np.cross(v23, v12), -delta)
+      rotmat = rotation_matrix(np.cross(v23, v12), delta)
       rotcent = self.atoms[angle[1]].r
       for ii in f2:
         self.atoms[ii].r = np.dot(rotmat, self.atoms[ii].r - rotcent) + rotcent
@@ -299,7 +367,7 @@ class Molecule:
     if newdeg is not None:
       f1, f2 = self.partition_mol(dihed[1], dihed[2])
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
-      rotmat = rotation_matrix(v2 - v3, delta)
+      rotmat = rotation_matrix(v2 - v3, -delta)
       rotcent = self.atoms[dihed[2]].r
       for ii in f2:
         self.atoms[ii].r = np.dot(rotmat, self.atoms[ii].r - rotcent) + rotcent
@@ -313,18 +381,15 @@ class Molecule:
   def __repr__(self):
     sr = lambda a: a if type(a) is str or safelen(a) < 10 else ("[<%d>]" % len(a))
     attrs = ["%s=%r" % (a, sr(getattr(self,a))) for a in dir(self) \
-        if not a.startswith('__') and not callable(getattr(self,a))]
+        if not a.startswith('_') and not callable(getattr(self,a))]
     return ("Molecule(%s)" % ', '.join(attrs)).replace('\n', ' ')
 
 
+  # .r is frequently accessed - we should make each Atom.r be a view of one row of saved r matrix!
   def __getattr__(self, attr):
-    """ molecule.<attr>
-      Except for special cases, returns array atoms[:].attr
-      .r is handled explicitly for speed
-      TODO: verify there is actually a speedup!
-    """
+    """ molecule.<attr>; except for special cases, returns array atoms[:].attr """
     if attr.startswith('_'):
-      raise AttributeError, attr
+      raise AttributeError(attr)
     if attr == 'r':
       return np.array([ self.atoms[ii].r for ii in self.listatoms() ])
     if attr == 'natoms':
@@ -333,26 +398,31 @@ class Molecule:
       return len(self.residues)
     if attr == 'bonds':
       return self.get_bonds()
+    if attr == 'mass':
+      return np.array([ELEMENTS[a.znuc].mass for a in self.atoms])
     #if self.atoms and hasattr(self.atoms[0], attr):  # infinite loop if self.atoms not set
-    if attr in ['name', 'znuc', 'mmtype', 'mmq', 'mmconnect', 'resnum']:
+    if attr in self._atomattrs:
       return np.array([ getattr(atom, attr) for atom in self.atoms ])
-    if attr in ['resname', 'resatoms', 'pdb_num', 'chain', 'het']:
+    if attr in self._resattrs:
       resattr = attr[3:] if attr[:3] == 'res' else attr
       return np.array([ getattr(res, resattr) for res in self.residues ])
-    raise AttributeError, attr
+    raise AttributeError(attr)
 
 
   def __setattr__(self, attr, val):
     """ molecule.<attr> = val  """
     if attr == 'r':
+      assert len(val) == len(self.atoms), "Incorrect length!"
       for ii in range(len(self.atoms)):
         self.atoms[ii].r = np.array(val[ii])  # copy
     #elif attr == 'bonds':
     #  self.set_bonds(val)
-    elif attr in ['name', 'znuc', 'mmtype', 'mmq', 'mmconnect', 'resnum']:
+    elif attr in self._atomattrs:
+      assert len(val) == len(self.atoms), "Incorrect length!"
       for ii in range(len(self.atoms)):
         setattr(self.atoms[ii], attr, val[ii])
-    elif attr in ['resname', 'resatoms', 'pdb_num', 'chain', 'het']:
+    elif attr in self._resattrs:
+      assert len(val) == len(self.residues), "Incorrect length!"
       resattr = attr[3:] if attr[:3] == 'res' else attr
       for ii in range(len(self.residues)):
         setattr(self.residues[ii], resattr, val[ii])
@@ -369,13 +439,10 @@ class Molecule:
 def get_header(mol):
   header = getattr(mol, 'header', None)
   if not header:
+    import time
     today = time.strftime("%d-%b-%y", time.localtime()).upper()
     header = "CUSTOM MOLECULE                         %s   XXXX" % today
   return header
-
-
-def get_extents(r, pad=0.0):
-  return np.array([np.amin(r, axis=0) - pad, np.amax(r, axis=0) + pad])
 
 
 # this will be very inefficient if used repeatedly
@@ -442,9 +509,9 @@ def nearest_pairs(r_array, N):
   return [ (ii, jj) for ii, loc in enumerate(locs) for jj in loc if jj > ii ]
 
 
-def generate_internals(bonds, impropers=False):
-  """ generate angles and dihedrals (optionally including 'fake' `improper` dihedrals) from a set of bonds """
-  max_idx = max([x for bond in bonds for x in bond])
+def generate_internals(bonds):  #, impropers=False):
+  """ generate angles, dihedrals, and improper torsions (w/ 2nd atom central atom) from a set of bonds """
+  max_idx = max([x for bond in bonds for x in bond]) if bonds else -1
   connect = [ [] for ii in range(max_idx + 1) ]
   for bond in bonds:
     connect[bond[0]].append(bond[1])
@@ -456,12 +523,11 @@ def generate_internals(bonds, impropers=False):
     for jj in connect[ii]
     for kk in connect[jj] if kk != ii
     for ll in connect[kk] if ll != jj and ll > ii ]
-  if impropers:
-    diheds.extend([ (ii, jj, kk, ll) for ii in range(len(connect))
-      for jj in connect[ii]
-      for kk in connect[jj] if kk != ii
-      for ll in connect[jj] if ll != kk and ll > ii ])
-  return angles, diheds
+  imptor = [ (ii, jj, kk, ll) for ii in range(len(connect))
+    for jj in connect[ii]
+    for kk in connect[jj] if kk != ii
+    for ll in connect[jj] if ll != kk and ll > ii ]
+  return angles, diheds, imptor
 
 
 def pdb_repr(mol, ii, sep=" "):
@@ -471,9 +537,17 @@ def pdb_repr(mol, ii, sep=" "):
   return sep.join([res.chain, res.pdb_num, a.name]) if res is not None else a.name
 
 
+def init_qmatoms(mol, sel, qmbasis):
+  sel = mol.select(sel)
+  for ii in sel:
+    mol.atoms[ii].qmbasis = qmbasis
+  return sel
+
+
 # consider returning a class with __call__ instead so we can set __repr__ to print sel string!
 def decode_atom_sel_str(sel):
   """ unqualifed exec() can't be in same function as a nested fn or lambda """
+  locs = {}  # needed for Python 3
   exec("""
 def sel_fn(atom, mol, idx):
   name = atom.name
@@ -495,9 +569,9 @@ def sel_fn(atom, mol, idx):
   extbackbone = protein and name in ['C', 'N', 'CA', 'O', 'H', 'H1', 'H2', 'H3', 'OXT', 'HXT']
   sidechain = protein and name not in ['C', 'N', 'O', 'H', 'H1', 'H2', 'H3', 'OXT', 'HXT']
   water = resname == 'HOH'
-  return """ + sel)
+  return """ + sel, globals(), locs)
   # ---
-  return sel_fn
+  return locs['sel_fn']
 
 
 def decode_atom_sel(sel):
@@ -534,54 +608,24 @@ def select_atoms(mol, sel=None, sort=None, pdb=None):
     selected = []
     pdbsels = re.sub(r'\s*,\s*', ',', pdb).split(';')  # remove spaces around commas
     for pdbsel in pdbsels:
-      ss = re.split(r'\s*/?\s*', pdbsel.strip())  # split on space or /
+      ss = pdbsel.strip().replace('/', ' ').split()  #re.split(r'\s*/\s*|\s+', pdbsel.strip())  # split on space or /
       ss = ss[1:] if not ss[0] else ss
       if not ss: continue  # empty selection
       assert len(ss) <= 3, "Too many fields in " + pdbsel
       # extend to contain all three fields; blank or * means match all
       full_ss = (['']*(3-len(ss)) + ss)  #if ss[0] else (ss[1:] + ['']*(3-len(ss)+1))
+      res_field = 'resname' if full_ss[1][-3:].isalpha() else 'pdb_resid'  # support residue name or number
       atomsel = " and ".join(
           (f + " not in " + str(s[1:].split(','))) if s[0] == '~' else (f + " in " + str(s.split(','))) \
-          for f, s in zip(['chain', 'pdb_resid', 'name'], full_ss) if s and s != '*')
+          for f, s in zip(['chain', res_field, 'name'], full_ss) if s and s != '*')
       # should we join with 'or' and create a single selection string instead?
       selected.extend(select_atoms(mol, atomsel if atomsel else 'True'))  # '*' will give empty atomsel
+  elif safelen(sel) > 0 and type(sel[0]) is int:
+    selected = sel  # preserve order
   else:
     sel_fn = decode_atom_sel(sel)
     selected = [ii for ii, atom in enumerate(mol.atoms) if sel_fn is None or sel_fn(atom, mol, ii)]
   return sorted(selected, key=lambda ii: sort(mol[ii], mol, ii)) if sort is not None else selected
-
-
-def extract_atoms(mol, sel=None, resnums=None):
-  """ return a new Molecule containing atoms from `mol` specified by `sel` or residue numbers `resnums` """
-  if sel is not None:
-    atom_idxs = select_atoms(mol, sel) if callable(sel) or type(sel) is str else sel
-    resnums = sorted(list(set([getattr(mol.atoms[ii], 'resnum', None) for ii in atom_idxs])))
-  elif resnums is not None:
-    resnums = [resnums] if type(resnums) is int else resnums
-    atom_idxs = [ii for resnum in resnums for ii in mol.residues[resnum].atoms]
-
-  resnum_map = dict(zip(resnums, range(len(resnums))))
-  idx_map = dict(zip(atom_idxs, range(len(atom_idxs))))
-  atoms = [setattrs(copy.copy(mol.atoms[ii]), resnum=resnum_map.get(mol.atoms[ii].resnum, None),
-      mmconnect=[idx_map[ii] for ii in mol.atoms[ii].mmconnect if ii in idx_map]) for ii in atom_idxs]
-  residues = [setattrs(copy.copy(mol.residues[ii]),
-      atoms=[idx_map[ii] for ii in mol.residues[ii].atoms if ii in idx_map]) for ii in resnums]
-  return Molecule(atoms, residues)
-
-
-# TODO: this should probably be a method of Molecule
-def remove_atoms(mol, sel):
-  """ remove atoms specified by `sel` from `mol` (in-place) """
-  idxs = select_atoms(mol, sel) if callable(sel) or type(sel) is str else sel
-  # process indices from largest to smallest index so it remains valid
-  idxs.sort(reverse=True)
-  for ii in idxs:
-    for atom in mol.atoms:
-      atom.mmconnect = [a - 1 if a > ii else a for a in atom.mmconnect if a != ii]
-    for residue in mol.residues:
-      residue.atoms = [a - 1 if a > ii else a for a in residue.atoms if a != ii]
-    del mol.atoms[ii]
-  return mol
 
 
 # How might we support final box extents + total number of copies?
@@ -619,14 +663,17 @@ def center_of_mass(mol):
   return np.sum(weights[:,None]*mol.r, axis=0)/np.sum(weights)
 
 
-def calc_RMSD(mol1, mol2, atoms=None):
-  """ Return RMS displacement (RMSD) between atoms of mol1 and atoms of mol2 """
+def calc_RMSD(mol1, mol2, atoms=None, grad=False):
+  """ Return RMS displacement (RMSD) between atoms of mol1 and atoms of mol2 and, if grad=True, gradient wrt
+    first set of coordinates
+  """
   # handle case of molecule objects
   r1 = getattr(mol1, 'r', mol1)
   r2 = getattr(mol2, 'r', mol2)
   dr = (r1 - r2) if atoms is None else (r1[atoms] - r2[atoms])
   natoms = np.size(dr)/3
-  return np.sqrt(np.sum(dr*dr)/natoms)
+  rmsd = np.sqrt(np.sum(dr*dr)/natoms)
+  return (rmsd, dr/(natoms*rmsd)) if grad else rmsd
 
 
 def alignment_matrix(subject, ref, weights=1.0):
@@ -638,7 +685,7 @@ def alignment_matrix(subject, ref, weights=1.0):
   if np.size(weights) > 1:
     totmass = np.sum(weights)
     # we assume weights is a row vector
-    weights = T(np.tile(weights, (3,1)))
+    weights = np.transpose(np.tile(weights, (3,1)))
   else:
     weights = 1.0  # prevent invalid scalar weight
     totmass = np.size(subject)/3  # number of atoms
@@ -649,7 +696,7 @@ def alignment_matrix(subject, ref, weights=1.0):
   subject = subject - CMsubject
   ref = ref - CMref
   # calculate correlation matrix (division by totmass isn't actually needed)
-  corr = np.dot(T(subject), weights*ref)/totmass
+  corr = np.dot(np.transpose(subject), weights*ref)/totmass
   u, w, vT = np.linalg.svd(corr)
   # calculate optimal rotation matrix
   rot = np.dot(u, vT)
@@ -676,7 +723,7 @@ def align_atoms(subject, ref, weights=1.0, sel=None):
 # note that sel+sort may give different indices for mol and ref, so taking a single list of indices would
 #  not be equivalent
 def align_mol(mol, ref, sel=None, sort='atom.resnum, atom.name'):
-  if hasattr(ref, 'r'):
+  if hasattr(ref, 'atoms'):
     ref = ref.r[ select_atoms(ref, sel, sort=sort) ] if sel else ref.r
   align = mol.r[ select_atoms(mol, sel, sort=sort) ] if sel else mol.r
   if len(align) == len(ref):
@@ -687,15 +734,18 @@ def align_mol(mol, ref, sel=None, sort='atom.resnum, atom.name'):
   return mol
 
 
-# Usage: mol.set_bonds(guess_bonds(mol.r, mol.znuc))
-def guess_bonds(r_array, z_array, tol=0.1):
+# Usage: mol.set_bonds(guess_bonds(mol))
+def guess_bonds(r_array, z_array=None, tol=0.1):
   """ return list of covalent bonds ((i,j), i < j) for atoms with positions r and atomic numbers z """
   from scipy.spatial.ckdtree import cKDTree
+  if z_array is None:
+    r_array, z_array = r_array.r, r_array.znuc
   # find all pairs within 5 Ang; largest covalent radius is 2.35 (Cs)
   ck = cKDTree(r_array)
   pairs = ck.query_pairs(5)
   bonds = []
   for i,j in pairs:
+    #rval = 1.3*(ELEMENTS[z_array[i]].cov_radius + ELEMENTS[z_array[j]].cov_radius) ... more standard
     rval = tol + ELEMENTS[z_array[i]].cov_radius + ELEMENTS[z_array[j]].cov_radius
     dr = r_array[i] - r_array[j]
     if np.dot(dr,dr) < rval*rval:

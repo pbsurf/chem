@@ -1,16 +1,15 @@
 import numpy as np
 from OpenGL.GL import *
 from OpenGL.arrays.vbo import VBO
-from glutils import *
-from shading import *
-
-from color import *
-from mol_renderer import StickRenderer, LineRenderer
+from .glutils import *
+from .shading import *
+from .color import *
+from .mol_renderer import StickRenderer, LineRenderer
 from ..molecule import decode_atom_sel
 from ..data.pdb_bonds import *
 
 
-TUBE_MESH_VERT_SHADER = """
+TRIANGLE_VERT_SHADER = """
 uniform mat4 mv_matrix;
 uniform mat4 p_matrix;
 
@@ -30,7 +29,7 @@ void main()
 }
 """
 
-TUBE_MESH_FRAG_SHADER = """
+TRIANGLE_FRAG_SHADER = """
 varying vec4 pos_view;
 varying vec3 normal;
 varying vec4 color;
@@ -43,13 +42,97 @@ void main()
 }
 """
 
-class TubeMeshRenderer:
+# Generic geometry renderer
+# we can move this and imposter renderers in mol_renderer.py to something like renderers.py
+class TriangleRenderer:
 
-  def __init__(self, aspect_ratio=0.125, radial_segments=20):
-    self.n_radial = radial_segments
-    self.aspect_ratio = aspect_ratio
+  def __init__(self):
+    self.n_indices = 0
     self.shader = None
     self.vao = None
+
+
+  def set_data(self, vertices, normals, colors, indices):
+    if self.shader is None:
+      self.modules = [RendererConfig.header, RendererConfig.shading]
+      vs = compileShader([m.vs_code() for m in self.modules] + [TRIANGLE_VERT_SHADER], GL_VERTEX_SHADER)
+      fs = compileShader([m.fs_code() for m in self.modules] + [TRIANGLE_FRAG_SHADER], GL_FRAGMENT_SHADER)
+      self.shader = compileProgram(vs, fs)
+
+    vertices = np.asarray(vertices, dtype=np.float32)
+    normals = np.asarray(normals, dtype=np.float32)
+    colors = np.asarray(colors, dtype=np.uint8)
+    indices = np.asarray(indices, dtype=np.uint32)
+    self.n_indices = np.size(indices)
+
+    if self.vao is None:
+      self.vao = glGenVertexArrays(1)
+      glBindVertexArray(self.vao)
+      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT)
+      self._norms_vbo = bind_attrib(self.shader, 'normal_in', normals, 3, GL_FLOAT)
+      self._color_vbo = bind_attrib(self.shader, 'color_in', colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
+      self._elem_vbo = VBO(indices, target=GL_ELEMENT_ARRAY_BUFFER)
+      self._elem_vbo.bind()
+      glBindVertexArray(0)
+    else:
+      # just update existing VBO for subsequent calls
+      update_vbo(self._verts_vbo, vertices)
+      update_vbo(self._norms_vbo, normals)
+      update_vbo(self._color_vbo, colors)
+      update_vbo(self._elem_vbo, indices)
+
+
+  def draw(self, viewer):
+    if self.n_indices < 1:
+      return
+    # GL state
+    glEnable(GL_CULL_FACE)
+    glCullFace(GL_BACK)
+
+    # uniforms
+    glUseProgram(self.shader)
+    for m in self.modules:
+      m.setup_shader(self.shader, viewer)
+    set_uniform(self.shader, 'mv_matrix', 'mat4fv', viewer.view_matrix())
+    set_uniform(self.shader, 'p_matrix', 'mat4fv', viewer.proj_matrix())
+
+    # draw
+    glBindVertexArray(self.vao)
+    glDrawElements(GL_TRIANGLES, self.n_indices, GL_UNSIGNED_INT, None)
+
+    glBindVertexArray(0)
+    glUseProgram(0)
+    glDisable(GL_CULL_FACE)
+
+
+# "mol" should be object w/ attributes: r (vertices), normals, colors, indices
+class VisTriangles:
+
+  def __init__(self):
+    self.renderer = TriangleRenderer()
+
+  def __repr__(self):
+    return "VisTriangles()"
+
+  def draw(self, viewer, pass_num):
+    if pass_num == 'opaque':  #'transparent'
+      self.renderer.draw(viewer)
+
+  def set_molecule(self, mol, r=None):
+    vertices, normals, colors, indices = mol.r, mol.normals, mol.colors, mol.indices
+    colors = np.repeat(colors, (np.size(vertices)/3)/(np.size(colors)/4), axis=0)
+    self.renderer.set_data(vertices, normals, colors, indices)
+
+  def on_key_press(self, viewer, keycode, key, mods):
+    return False
+
+
+class TubeMeshRenderer(TriangleRenderer):
+
+  def __init__(self, aspect_ratio=0.125, radial_segments=20):
+    TriangleRenderer.__init__(self)
+    self.n_radial = radial_segments
+    self.aspect_ratio = aspect_ratio
 
 
   def set_data(self, centers, axes, radii, orientations, colors, breaks):
@@ -60,11 +143,6 @@ class TubeMeshRenderer:
     if len(centers) < 2:
       self.n_indices = 0
       return
-    if self.shader is None:
-      self.modules = [RendererConfig.header, RendererConfig.shading]
-      vs = compileShader([m.vs_code() for m in self.modules] + [TUBE_MESH_VERT_SHADER], GL_VERTEX_SHADER)
-      fs = compileShader([m.fs_code() for m in self.modules] + [TUBE_MESH_FRAG_SHADER], GL_FRAGMENT_SHADER)
-      self.shader = compileProgram(vs, fs)
 
     nr = self.n_radial
     centers = np.asarray(centers)
@@ -89,57 +167,16 @@ class TubeMeshRenderer:
     # these are vertex normals, which will get interpolated across faces and give smooth shading
     normals = self.aspect_ratio*cosmajors + sinminors
     normals = normals/(np.sqrt(np.sum(normals*normals, axis=-1))[:,:,None])
-
-    vertices = vertices.astype(np.float32)
-    normals = normals.astype(np.float32)
+    # colors
     rep_colors = np.repeat(colors, nr, axis=0).astype(np.uint8)
-
     # indices to create triangle strip around each axial segment
     facet = np.array([0, nr, nr + 1, 0, nr + 1, 1])  # two triangles for quad for single facet
     hoop = facet + np.arange(nr)[:,None]  # note use of broadcasting
     hoop[-1] = np.array([nr - 1, 2*nr - 1, nr, nr - 1, nr, 0])
     chain_indices = nr*np.concatenate([np.arange(a, b-1) for a,b in zip(breaks, breaks[1:])])
     indices = hoop + chain_indices[:,None,None]  # note use of broadcasting
-    self.n_indices = np.size(indices)
 
-    if self.vao is None:
-      self.vao = glGenVertexArrays(1)
-      glBindVertexArray(self.vao)
-      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT)
-      self._norms_vbo = bind_attrib(self.shader, 'normal_in', normals, 3, GL_FLOAT)
-      self._color_vbo = bind_attrib(self.shader, 'color_in', rep_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
-      self._elem_vbo = VBO(indices.astype(np.uint32), target=GL_ELEMENT_ARRAY_BUFFER)
-      self._elem_vbo.bind()
-      glBindVertexArray(0)
-    else:
-      # just update existing VBO for subsequent calls
-      update_vbo(self._verts_vbo, vertices)
-      update_vbo(self._norms_vbo, normals)
-      update_vbo(self._color_vbo, rep_colors)
-      update_vbo(self._elem_vbo, indices.astype(np.uint32))
-
-
-  def draw(self, viewer):
-    if self.n_indices < 1:
-      return
-    # GL state
-    glEnable(GL_CULL_FACE)
-    glCullFace(GL_BACK)
-
-    # uniforms
-    glUseProgram(self.shader)
-    for m in self.modules:
-      m.setup_shader(self.shader, viewer)
-    set_uniform(self.shader, 'mv_matrix', 'mat4fv', viewer.view_matrix())
-    set_uniform(self.shader, 'p_matrix', 'mat4fv', viewer.proj_matrix())
-
-    # draw
-    glBindVertexArray(self.vao)
-    glDrawElements(GL_TRIANGLES, self.n_indices, GL_UNSIGNED_INT, None)
-
-    glBindVertexArray(0)
-    glUseProgram(0)
-    glDisable(GL_CULL_FACE)
+    TriangleRenderer.set_data(self, vertices, normals, rep_colors, indices)
 
 
 LINE_RIBBON_VERT_SHADER = """

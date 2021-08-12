@@ -17,7 +17,7 @@ from chem.basics import *
 #  correctness, gradient must still be *consistent* with energy or optimization won't work right!
 # With decreasing step size (dr = 0.5*dr), dE_actual should lie between (or very close to) dE_expect0 and
 #  dE_expect1, which should themselves get closer together with each reduction of step size
-def sanity_check(qmmm, dratoms=None, r0=None):
+def qmmm_sanity_check(qmmm, dratoms=None, r0=None):
   """ given a configured QMMM object `qmmm`, apply random translations to atoms `dratoms` and print energy
     and gradient information
   """

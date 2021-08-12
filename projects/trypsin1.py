@@ -5,7 +5,7 @@ from chem.io import load_molecule, cclib_open
 from chem.io.pdb import copy_residues, write_pdb
 from chem.io.tinker import write_tinker_xyz, tinker_EandG
 from chem.opt.dlc import DLC, Cartesian, HDLC
-from chem.opt.optimize import optimize, XYZ
+from chem.opt.optimize import moloptim, XYZ
 from chem.qmmm.qmmm1 import QMMM
 from chem.qmmm.prepare import protonation_check, neutralize
 
@@ -187,6 +187,7 @@ else:
 r_prep = trypsin.r  # save geom
 
 # initial MM minimization of system in cartesians
+optimize = moloptim
 mm_opt_xyz = folder + "/mm_optimized.xyz"
 if not os.path.exists(mm_opt_xyz):
   tinker_args = Bunch(prefix=tmpfolder + "/initialMM", key=tinker_qmmm_key)
@@ -229,7 +230,7 @@ fullqmatoms = select_atoms(trypsin, pdb="A 57,102,195 ~C,N,CA,O,H,HA; I 5 CA,C,H
 qmatoms = select_atoms(trypsin, pdb="A 195 ~C,N,CA,O,H,HA")
 #print("qmatoms net MM charge: %.3f" % sum([trypsin.atoms[ii].mmq for ii in qmatoms]))
 
-#~ qmatoms = fullqmatoms
+qmatoms = fullqmatoms
 
 # other important subsets of atoms ... this should probably be in qmmm
 mmatoms = trypsin.listatoms(exclude=qmatoms)
@@ -309,8 +310,8 @@ qmmm.qm_opts.inp += " $GUESS GUESS=MOREAD $END\n"
 #vis_qmmm_dens()
 
 # QMMM E and G sanity checks
-#from chem.test.qmmm_test import sanity_check
-#sanity_check(qmmm, dratoms=qmatoms + M1atoms + M2atoms)
+#from chem.test.qmmm_test import qmmm_sanity_check
+#qmmm_sanity_check(qmmm, dratoms=qmatoms + M1atoms + M2atoms)
 
 # create HDLC object for whole structure w/ DLC object for QM region and cartesians for MM region
 # - system has far too many atoms for single DLC object; could try per-residue DLCs instead of Cartesians
@@ -481,7 +482,7 @@ raise Exception("quit script")
 if 0:
   # Tinker adds both HD1 and HE2 hydrogens to HIS residues, giving +1 charge ... we need to remove one
   # remove HE2 from HIS A 57, since this position receives HG from SER 176 (A 195) during reaction
-  remove_atoms(trypsin, "pdb_resnum == 57 and name == 'HE2'")
+  trypsin.remove_atoms("pdb_resnum == 57 and name == 'HE2'")
 
   # for other HIS, remove HD1 or HE2, depending on which results in lower energy
   # - this can be made into a generic fn
@@ -505,7 +506,7 @@ if 0:
   # currently no difference in efficiency between removing one atom at time vs. multiple
   for resnum, E_h in E_h_his.iteritems():
     E_h.sort(key=lambda b: b.E)
-    remove_atoms(trypsin, [b.atom for b in E_h[1:]])
+    trypsin.remove_atoms([b.atom for b in E_h[1:]])
 
 
 ## Explicit solvation ... not used for now; fairly generic, so maybe move to prepare.py eventually

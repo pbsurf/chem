@@ -78,6 +78,7 @@
 import numpy as np
 from ..basics import *
 from ..molecule import mol_fragments, fragment_connections, generate_internals, nearest_pairs
+from .coords import XYZ
 
 class DLC:
 
@@ -88,6 +89,7 @@ class DLC:
   diffeps = 0.0  # converge threshold of RMS( (dS_i - dS_{i-1})/S ) - for redundant internals (UT = 1)
   maxit = 60
   recalc = 0
+  local_cons_idx = False
 
   def __init__(self, mol, atoms=None, bonds=[], angles=[], diheds=[], xyzs=[], coord_fns=[], connect=[],
       autobonds='conn', autoangles='conn', autodiheds='conn', autoxyzs='none', constrain=[], **kargs):
@@ -131,7 +133,9 @@ class DLC:
       frags = mol_fragments(mol)
       connect = fragment_connections(mol.r, frags) if len(frags) > 1 else []
     bonds0 = mol.get_bonds(active=atoms) + connect
-    angles0, diheds0 = generate_internals(bonds0, impropers=(autodiheds == 'impropers'))
+    angles0, diheds0, imptors0 = generate_internals(bonds0)
+    if autodiheds == 'impropers':
+      diheds0 = diheds0 + imptors0
     if autobonds == 'total':
       # total connection
       bonds0 = [ (a0, a1) for ii,a0 in enumerate(self.atoms) for a1 in self.atoms[ii+1:] ]
@@ -164,7 +168,7 @@ class DLC:
         + sum(len(coord(self.X)) for coord in self.coord_fns)
 
     # remaining args (e.g. eps, maxit) and constraints
-    for key, val in kargs.iteritems():
+    for key, val in kargs.items():
       if not hasattr(self, key):
         raise AttributeError, key
       setattr(self, key, val)
@@ -289,11 +293,6 @@ class DLC:
     return self.S[len(self.C):]
 
 
-  def nactive(self):
-    """ return number of active DLCs """
-    return len(self.S) - len(self.C)
-
-
   def gradfromxyz(self, gxyz):
     self.A = self.A if self.A is not None else self.calc_A(self.B)
     gS = np.dot(self.A, np.ravel(gxyz))
@@ -321,10 +320,11 @@ class DLC:
   def constrain(self, constraints):
     clist = [constraints] if type(constraints[0]) is int else constraints
     for c in clist:
-      if len(c) == 2: self.constraint(self.bond(c))
+      if len(c) == 1: [ self.constraint(self.cartesian(c[0], ii)) for ii in [0,1,2] ]
+      elif len(c) == 2: self.constraint(self.bond(c))
       elif len(c) == 3: self.constraint(self.angle(c))
       elif len(c) == 4: self.constraint(self.dihed(c))
-      else: raise ValueError('Atom list must have length 2, 3, or 4')
+      else: raise ValueError('Atom list must have length 1, 2, 3, or 4')
 
 
   # these fns can be used to create more complex constraints, e.g. linear combinations
@@ -350,6 +350,12 @@ class DLC:
     atoms = tuple(a0) if a3 is None else tuple(a0, a1, a2, a3)
     return self.get_internal(atoms, self.diheds, len(self.bonds) + len(self.angles))
 
+  def cartesian(self, a0, c0):
+    """ get redundant internal unit vector corresponding to a cartesian component c0 for atom a0 """
+    cartidx = 3*a0 + c0 if self.local_cons_idx else 3*self.atoms.index(a0) + c0
+    offset = self.cartesians.index(cartidx) + len(self.bonds) + len(self.angles) + len(self.diheds)
+    return setitem(np.zeros(self.nQ), offset, 1.0)
+
 
   ## private methods
 
@@ -357,7 +363,7 @@ class DLC:
     """ helper function for bond(), angle(), dihed() """
     Qunit = np.zeros(self.nQ)
     for ii, q_local in enumerate(internals):
-      q_global = tuple(self.atoms[jj] for jj in q_local)
+      q_global = q_local if self.local_cons_idx else tuple(self.atoms[jj] for jj in q_local)
       if q_global == atoms or q_global == atoms[::-1]:
         Qunit[ii + offset] = 1.0
         break
@@ -456,20 +462,28 @@ class DLC:
     #  numpy doc says eigenvalues may be unordered.  We will assume the eigenvalues are ordered.
     nS = np.sum(np.abs(eigval) > 1e-10)
     if not( 3*self.N - 6 <= nS <= 3*self.N ):
-      print "Warning: invalid number of pre-constraint DLCs (%d DLCs, %d atoms)" % (nS, self.N)
+      print("Warning: invalid number of pre-constraint DLCs (%d DLCs, %d atoms)" % (nS, self.N))
     UT = eigvec.T[-nS:]
-    if self.C:
-      # project out constraints
-      # project constraints onto active space
-      Cps = np.array([ np.sum([np.dot(Uj, Ci) * Uj for Uj in UT], 0) for Ci in self.C ]).T
-      # use QR decomp to perform Gram-Schmidt
-      q,r = np.linalg.qr(np.hstack( (Cps, UT.T) ))
-      # form [constraints, active space]
-      # TODO: verify that T(q) here is correct!
-      ###UT = np.vstack( (self.C, T(q)[-(nS - len(self.C)):]) )
-      UT = np.vstack( (self.C, q.T[len(self.C):nS]) )
-    # ---
-    return UT
+    return self.proj_cons(UT) if len(self.C) > 0 else UT
+
+
+  def proj_cons(self, UT):
+    # project constraints onto active space
+    Cps = np.array([ np.sum([np.dot(Uj, Ci) * Uj for Uj in UT], 0) for Ci in self.C ])
+    # check for linearly dependent (i.e. redundant) constraints
+    # removing linearly dependent constraints after combined QR decomp didn't seem to work
+    qC, rC = np.linalg.qr(Cps.T)
+    indepC = np.abs(np.diag(rC)) > 1e-10
+    ndep = len(indepC) - np.sum(indepC)
+    if ndep > 0:
+      print("Note: removing %d linearly dependent constraints" % ndep)
+      Cps = Cps[indepC]
+      self.C = np.asarray(self.C)[indepC]
+    # use QR decomp to perform Gram-Schmidt
+    q,r = np.linalg.qr(np.hstack( (Cps.T, UT.T) ))
+    # form [constraints, active space]
+    #if np.any(np.abs(np.diag(r)[:len(UT)]) < 1e-10): print("Warning: coords not linearly indep")
+    return np.vstack( (self.C, q.T[len(self.C):len(UT)]) )
 
 
 # Using identity matrix (actually just scalar 1.0) for UT matrix in DLCs gives redundant internal coordinates
@@ -477,6 +491,11 @@ class DLC:
 # In general, we can't expect tight convergence in DLC.toxyz() with redundant internals (X will converge
 #  to least squares optimal solution for given Q), so convergence is detected by small change in dS (=dQ)
 #  between iterations (threshold is diffeps)
+# Notes:
+# - (B.*B_pinv).*dQ (note we denote B_pinv by A) creates a physically valid dQ from an arbitrary dQ - see
+#  10.1063/1.1515483 (Bakken, Helgaker 2002) - this paper also gives 1st and 2nd derivs for internals!
+# - some codes use the result of the first step (B_pinv.*dQ) if toxyz() fails to converge, see
+#  github.com/jhrmnn/pyberny/blob/master/src/berny/coords.py
 class Redundant(DLC):
 
   def __init__(self, *args, **kwargs):
@@ -495,54 +514,7 @@ class Redundant(DLC):
     return np.dot( np.linalg.pinv(np.dot( Ba, Ba.T )), Ba )
 
   def calc_active(self):
-    UT = 1.0
-    if self.C:
-      UT = np.eye(self.nQ)
-      # project out constraints
-      # project constraints onto active space
-      Cps = np.array([ np.sum([np.dot(Uj, Ci) * Uj for Uj in UT], 0) for Ci in self.C ]).T
-      # use QR decomp to perform Gram-Schmidt
-      q,r = np.linalg.qr(np.hstack( (Cps, UT.T) ))
-      # form [constraints, active space]
-      UT = np.vstack( (self.C, q.T[len(self.C):self.nQ]) )
-    # ---
-    return UT
-
-
-class Cartesian:
-  """ emulate DLC object for cartesian coordinates; to use cartesians with some residues for HDLC """
-
-  def __init__(self, mol, atoms=None):
-    # note that ravel() returns a view if possible, so must explicitly copy array if a copy is needed
-    self.X = mol.r[atoms] if atoms is not None else np.copy(mol.r)
-    self.atoms = atoms if atoms is not None else mol.listatoms()
-
-  def __repr__(self):
-    return "Cartesian(atoms: %d)" % len(self.atoms)
-
-  def init(self, X=None):
-    if X is not None:
-      self.X = np.copy(X)
-    return self
-
-  # note that here newX will equal Sactive, so it's ignored
-  def update(self, Sactive, newX=None):
-    self.X = np.reshape(Sactive, (-1,3))
-
-  def toxyz(self, S):
-    return np.reshape(S, (-1,3))
-
-  def xyzs(self):
-    return self.X
-
-  def active(self):
-    return np.ravel(self.X)
-
-  def nactive(self):
-    return np.size(self.X)
-
-  def gradfromxyz(self, gxyz):
-    return np.ravel(gxyz)
+    return self.proj_cons(np.eye(self.nQ)) if self.C else 1.0
 
 
 # TODO: I think we can eliminate self.groups and just use self.dlcs[].atoms
@@ -575,7 +547,7 @@ class HDLC:
         self.dlcs.append(group)
         group = group.atoms
       elif len(group) == 1:
-        self.dlcs.append( Cartesian(mol, atoms=group) )
+        self.dlcs.append( XYZ(mol, atoms=group) )
       else:
         self.dlcs.append( DLC(mol, atoms=group, **dlcoptions) )
       self.groups.append(group)
@@ -589,7 +561,7 @@ class HDLC:
       self.groups.extend(resgroups)
       for resgroup in resgroups:
         if len(resgroup) == 1:
-          self.dlcs.append(Cartesian(mol, atoms=resgroup))
+          self.dlcs.append(XYZ(mol, atoms=resgroup))
         else:
           self.dlcs.append(DLC(mol, atoms=resgroup, **dlcoptions))
 
@@ -629,7 +601,7 @@ class HDLC:
     S = []
     jj = 0
     for ii, dlc in enumerate(self.dlcs):
-      nactive = dlc.nactive()
+      nactive = np.size(dlc.active())
       S.append(Sactive[jj:jj+nactive])
       jj += nactive
       Xs.append( dlc.toxyz(S[ii]) )
@@ -641,7 +613,7 @@ class HDLC:
       print("%d of %d DLCs reinitialized due to update failure" % (np.count_nonzero(failed), len(self.dlcs)))
       return False
     for ii, dlc in enumerate(self.dlcs):
-      dlc.update(Sactive=S[ii], newX=Xs[ii])
+      dlc.update(S[ii], newX=Xs[ii])
     return True
     # failed can be added to internal array of counters
     #  to track number of failures for each residue

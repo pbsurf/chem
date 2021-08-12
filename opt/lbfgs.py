@@ -2,6 +2,7 @@
 # I didn't want to do this (really!), but for NEB, dimer method w/ L-BFGS, etc., we need optimizer that can
 #  work w/o function value, only gradient ... maxls=0 (or 1) w/ scipy.optimize L-BFGS doesn't work
 # If fn value is available, no reason not to use scipy LBFGS, and no indication I can improve on that code
+# See test/opt_test.py for tests and misc code (e.g. update of Hessian instead of inverse)
 
 # LBFGS history length defaults:
 #  pytorch, UT SDLBFGS 100; scipy, pDynamo 10; NLPy 5, ? num DOF
@@ -37,10 +38,10 @@
 # - nlpy: LBFGS, others - https://sourceforge.net/p/nlpy
 # - DL-FIND: Fortran
 # - OpenOpt: abandoned, mostly wrappers around scipy, etc
-# See test/ts_test.py for TS optimization
+# See test/ts_test.py for TS optimization refs
 
 # Misc ideas:
-# - ASE BFGS updates B (instead of H) and doesn't enforce it be positive-definite; instead gets eigenvalues
+# - ASE BFGS updates B (instead of H) and doesn't enforce it be positive-definite; instead get eigenvalues
 #  and eigenvectors every iteration and reverses sign of negative eigenvalues
 
 from collections import deque
@@ -48,6 +49,7 @@ import numpy as np
 from ..basics import Bunch  # or just use dict() instead
 
 
+# BFGS update of inv. Hessian
 class BFGS:
   def __init__(self, H0=1/70.0):
     self.H0 = H0
@@ -75,6 +77,12 @@ class BFGS:
     return -np.dot(self.H,g)
 
 
+# symmetric-rank-one update of inv. Hessian - does not guarantee positive definite Hessian
+#s, y = dr, g - self.g0  # standard notation
+#z = s - np.dot(self.H, y)
+#self.H = self.H + np.outer(z, z)/np.dot(z, y)
+
+
 def lbfgs_mult(g, s, y, rho):
   """ calculate H .* g where H is inverse Hessian estimate from s, y, rho """
   m = len(s)
@@ -95,6 +103,7 @@ def lbfgs_mult(g, s, y, rho):
   return z
 
 
+# L-BFGS update of inv. Hessian
 class LBFGS:
   def __init__(self, H0=1/70.0, maxhist=10):
     self.H0 = H0
@@ -126,10 +135,10 @@ class LBFGS:
     return -lbfgs_mult(g, self.s, self.y, self.rho) if self.s else -np.dot(self.H0, g)  # allow matrix or scalar H0
 
 
-def optimize(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=0.9, maxiter=1000, maxdr=1.0):
+def gradoptim(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=0.9, maxiter=1000, maxdr=1.0):
   """ Find stationary point of objective function fn in negative gradient direction
-    x0: initial guess
     fn: objective function returning scalar value and gradient
+    x0: initial guess
     stepper: object with method step(dr, gradient) -> next dr; defaults to LBFGS Hessian update
     gtol: optimization terminated if max(abs(G)) < gtol
     ftol: optimization terminated if abs(delta f)/f < ftol (if ftol > 0)
@@ -146,8 +155,20 @@ def optimize(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=0
   for iter in range(maxiter):
     # note that reshaping here usually won't require any copying of data
     rin = np.reshape(r, rinshape) if rinshape else r
-    fout, gout = fn(rin)
+    try:
+      fout, gout = fn(rin)
+    except ValueError as e:
+      if e.message == 'Stop':  # allow fn to stop optim based on some internal criteria
+        return Bunch(x=prev_rin, nextx=rin, fun=fout, grad=gout, jac=gout, success=False, nit=iter)
+      if e.message != 'Coord breakdown':
+        raise
+      stepper.reset()  # also r -= dr to go back to last known working coords?
+      continue
+    except KeyboardInterrupt:
+      print("Optimization stopped by KeyboardInterrupt; returning state at iteration %d" % iter)
+      return Bunch(x=prev_rin, nextx=rin, fun=fout, grad=gout, jac=gout, success=False, nit=iter)
     g = np.ravel(gout) if np.ndim(gout) > 1 else np.asarray(gout)
+    prev_rin = rin
 
     # check for termination
     gterm = np.max(np.abs(g)) < gtol  # other options: np.linalg.norm(g) < gtol*np.size(r)
@@ -155,7 +176,7 @@ def optimize(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=0
     if gterm or fterm:
       print("Optimization completed:%s%s" % (
           (" max |g| < %g" % gtol) if gterm else "", (" df/f < %g" % ftol) if fterm else "" ))
-      return Bunch(x=rin, fun=fout, grad=gout, success=True, niter=iter)
+      return Bunch(x=rin, fun=fout, grad=gout, jac=gout, success=True, nit=iter)
 
     # check first Wolfe condition (aka Armijo condition) - sufficient fn decrease
     if iter > 0 and ftol > 0 and fout > f0 + wolfe1*np.dot(g0, dr):
@@ -190,4 +211,4 @@ def optimize(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=0
     #if np.vdot(dr, g) > 0: print("Step direction >90 deg from steepest descent direction")
     r = r + dr
 
-  return Bunch(x=rin, fun=fout, grad=gout, success=False)
+  return Bunch(x=rin, fun=fout, grad=gout, jac=gout, success=False, nit=maxiter)

@@ -4,7 +4,7 @@ import ctypes
 import numpy as np
 from OpenGL.GL import *
 from OpenGL.arrays.vbo import VBO
-from glutils import *
+from .glutils import *
 
 
 # Refs (C+S+o to open!)

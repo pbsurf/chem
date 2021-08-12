@@ -2,6 +2,46 @@ from chem.basics import *
 from chem.opt.lbfgs import *
 import scipy.optimize
 
+# Move BFGS2 to lbfgs.py if we find a use for it (cursory testing shows inferior performance)
+
+# BFGS updating Hessian instead of inverse
+class BFGS2:
+  def __init__(self, H0=1/70.0):
+    self.B0 =  np.linalg.inv(H0) if np.ndim(H0) > 0 else 1.0/H0
+    self.B = self.B0
+    self.g0 = None
+
+  def reset(self, H0=None, g0=None):
+    self.B = self.B0 if H0 is None else (np.linalg.inv(H0) if np.ndim(H0) > 0 else 1.0/H0)
+    self.g0 = g0
+
+  def step(self, dr, g):
+    if np.ndim(self.B) == 0:
+      self.B = self.B * np.eye(len(g))
+    if self.g0 is None:
+      self.g0 = g
+      return -np.dot(np.linalg.inv(self.B), g)
+    s, y = dr, g - self.g0  # standard notation
+    dg = np.dot(self.B, s)
+    self.B = self.B + np.outer(y, y)/np.dot(s, y) - np.outer(dg, dg)/np.dot(s, dg)
+    self.g0 = g
+    #return -np.dot(np.linalg.inv(self.B), g)
+    # RFO from pyberny
+    rfo = np.vstack((np.hstack((self.B, g[:, None])), np.hstack((g, 0))[None, :]))
+    D, V = np.linalg.eigh((rfo + rfo.T)/2)  # not necessary - B and rfo already symmetric by construction
+    return V[:-1, 0]/V[-1, 0]
+    # try removing small eigenvals (for translation/rotation)
+    # ... if hess is created from grad, does this actually happen?
+
+# For full Newton's method w/ analytic Hessian, likely necessary to remove small Hessian eigenvalues, esp.
+#  corresponding to translation and rotation; Typical LJ and Coulomb systems seem to have only 3 very small
+#  eigenvalues (<1E-12), all others >~1E-5 ... remove very small eigenvalues and limit step size, or remove more?
+# This does not appear to be an issue for quasi-Newton Hessian estimates
+#omega, V = np.linalg.eigh(self.B)
+#nz = np.abs(omega) > 1E-12  # threshold should probably be configurable
+#omega, V = omega[nz], (V.T)[nz]
+#return -np.dot(V.T, np.dot(V, g) / np.fabs(omega))
+
 
 def monitor(fn, printr=False):
   self = Bunch(r0=0, g0=None)

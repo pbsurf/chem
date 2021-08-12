@@ -216,5 +216,5 @@ class LanczosMethod:
     Gtau = np.vdot(G0, self.tau)*self.tau
     # reverse gradient along tau direction (if curvature < 0 - otherwise move directly uphill)
     Geff = G0 - 2*Gtau if w < 0 else -Gtau
-    print("max force: %f; curvature: %f; EandG calls: %d" % (np.max(np.abs(Geff)), w, self.ncalls))
+    print("E0: %f; max force: %f; curvature: %f; EandG calls: %d" % (E0, np.max(np.abs(Geff)), w, self.ncalls))
     return E0, Geff

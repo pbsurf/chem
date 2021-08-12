@@ -4,7 +4,8 @@ APTINST="sudo apt-get --no-install-recommends -y install "
 GATEWAY=`ip addr | sed -nE 's/^\s*inet ([0-9]+\.[0-9]+\.[0-9]+).*eth0$/\1.1/p'`
 SERVER="http://$GATEWAY:8080"
 
-SITE_PKGS=$HOME/.local/lib/python2.7/site-packages
+#SITE_PKGS=$HOME/.local/lib/python2.7/site-packages
+SITE_PKGS=$HOME/.local/lib/python3.9/site-packages
 
 # root directory for installation
 CHEM=$HOME/qc
@@ -29,8 +30,23 @@ mkdir -p $CHEM
 cd $CHEM
 echo "export CHEM=$CHEM" >> $HOME/.localrc
 
-# Python
-$APTINST libopenblas-dev python-numpy python-scipy python-sympy #python-matplotlib
+# conda python:
+# conda is slow, esp. w/ conda-forge channel - consider trying mamba
+conda install openmm "cudatoolkit<10"  # pick the smallest cuda version since cpu-only isn't available
+conda install openmmtools matplotlib pyopengl
+conda install openblas  # needed to build pyscf (libopenblas only provides the .so)
+#conda install ambertools openmmforcefields
+#conda install -c psi4/label/dev psi4=1.4rc1  # python 3.9 only supported in dev channel
+
+# Removing cudatoolkit: conda remove --force cudatoolkit, then delete the cudatoolkit lines from the depends
+#  sections in pkgs/openmm-<version>/info/repodata_record.json and conda-meta/openmm-<version>.json
+
+# fancier python prompt
+conda install rich pdbpp  #ptpython
+
+# system python:
+##$APTINST libopenblas-dev python-numpy python-scipy python-sympy #python-matplotlib
+#$APTINST libmkl-rt -- MKL now available via apt, but doesn't seem any faster than openblas
 
 #$APTINST nwchem
 #$APTINST pymol
@@ -41,32 +57,16 @@ $APTINST libopenblas-dev python-numpy python-scipy python-sympy #python-matplotl
 git clone https://bitbucket.org/mattrwhite/chem
 ln -s $CHEM/chem $SITE_PKGS/chem
 
-# PyQuante v1
-#$APTINST subversion
-#svn checkout svn://svn.code.sf.net/p/pyquante/code/trunk pyquante
-wget https://sourceforge.net/code-snapshots/svn/p/py/pyquante/code/pyquante-code-219-trunk.zip
-unzip pyquante-code-219-trunk.zip
-mv pyquante-code-219-trunk pyquante
-rm pyquante-code-219-trunk.zip
-(cd pyquante && python setup.py build)
-ln -s $CHEM/pyquante/build/lib.linux-x86_64-2.7/PyQuante $SITE_PKGS/PyQuante
+# need to see if pyglfw package works
+(cd $CHEM/chem/external &&  wget https://raw.githubusercontent.com/rougier/pyglfw/master/glfw.py)
 
-# PyQuante v2
-git clone https://github.com/rpmuller/pyquante2.git
-(cd pyquante2 && python setup.py build)
-ln -s $CHEM/pyquante2/build/lib.linux-x86_64-2.7/pyquante2 $SITE_PKGS/pyquante2
-
-# cclib
-git clone https://github.com/cclib/cclib.git
-# I don't think build is actually needed, as cclib is python only
-(cd cclib && python setup.py build) # && python setup.py install --user)
-ln -s $CHEM/cclib/src/cclib $SITE_PKGS/cclib
-
-# PySCF
+# PySCF - pip and conda pyscf are significantly slower (appear to use libcint instead of qcint)
 $APTINST cmake
 git clone https://github.com/sunqm/pyscf
 pushd pyscf/pyscf/lib
-(mkdir build && cd build && cmake .. && make)
+# if you edit pyscf/lib/build instead to change github/libcint to qcint, also make sure version tag exists!
+#(mkdir build && cd build && cmake .. && make)
+(mkdir build && cd build && LD_LIBRARY_PATH=$CONDA_PREFIX/lib cmake -DBLA_VENDOR=OpenBLAS .. && make)
 popd
 ln -s $CHEM/pyscf/pyscf $SITE_PKGS/pyscf
 
@@ -80,10 +80,29 @@ ln -s ../../build/deps/src/qcint/build/libcint.so.3.0 libcint.so.3.0
 popd
 echo "Replaced libcint with qcint for PySCF - may need to rerun link command with `-lmvec -lm` prepended to list of libraries"
 
+# Tinker
+mkdir tinker
+pushd tinker
+# common files
+wget http://dasher.wustl.edu/tinker/downloads/tinker-8.9.1.tar.gz
+tar xaf tinker-8.9.1.tar.gz
+# linux exe
+wget http://dasher.wustl.edu/tinker/downloads/bin-linux64-8.9.1.tar.gz
+tar xaf bin-linux64-8.9.1.tar.gz
+rm *-8.9.1.tar.gz
+popd
+echo 'export TINKER_PATH=$CHEM/tinker/bin-linux64' >> $HOME/.localrc
+
 # Molden
-wget ftp://ftp.cmbi.ru.nl/pub/molgraph/molden/bin/Linux/molden5.7.full.ubuntu.64.tar.gz
-tar xaf molden5.7.full.ubuntu.64.tar.gz
-rm molden5.7.full.ubuntu.64.tar.gz
+wget ftp://ftp.cmbi.ru.nl/pub/molgraph/molden/bin/Linux/molden5.8.full.ubuntu.64.tar.gz
+tar xaf molden5.8.full.ubuntu.64.tar.gz
+rm molden5.8.full.ubuntu.64.tar.gz
+
+# packages needed to build Molden from source
+#$APTINST xutils-dev libglu-dev libgl-dev libglx-devlibx11-dev gfortran
+
+
+## optional stuff
 
 # VMD
 ## TODO: install to $HOME instead of system-wide!
@@ -108,22 +127,30 @@ rm toppar.tar.gz
 popd
 echo 'export NAMD_PATH=$CHEM/namd' >> $HOME/.localrc
 
-# Tinker
-mkdir tinker
-pushd tinker
-# common files
-wget http://dasher.wustl.edu/tinker/downloads/tinker-7.1.2.tar.gz
-tar xaf tinker-7.1.2.tar.gz
-# linux exe
-wget http://dasher.wustl.edu/tinker/downloads/bin-linux64-7.1.2.tar.gz
-tar xaf bin-linux64-7.1.2.tar.gz
-rm *-7.1.2.tar.gz
-popd
-echo 'export TINKER_PATH=$CHEM/tinker/bin-linux64' >> $HOME/.localrc
-
 # GAMESS
 wget $SERVER/gamess-us-18aug2016R1.tar.gz
 tar xaf gamess-us-18aug2016R1.tar.gz
 rm gamess-us-18aug2016R1.tar.gz
 (cd gamess && sh ../chem/misc/inst-gamess.sh)
 echo 'export GAMESS_PATH=$CHEM/gamess' >> $HOME/.localrc
+
+# cclib
+git clone https://github.com/cclib/cclib.git
+# I don't think build is actually needed, as cclib is python only
+(cd cclib && python setup.py build) # && python setup.py install --user)
+ln -s $CHEM/cclib/src/cclib $SITE_PKGS/cclib
+
+# PyQuante v1
+#$APTINST subversion
+#svn checkout svn://svn.code.sf.net/p/pyquante/code/trunk pyquante
+wget https://sourceforge.net/code-snapshots/svn/p/py/pyquante/code/pyquante-code-219-trunk.zip
+unzip pyquante-code-219-trunk.zip
+mv pyquante-code-219-trunk pyquante
+rm pyquante-code-219-trunk.zip
+(cd pyquante && python setup.py build)
+ln -s $CHEM/pyquante/build/lib.linux-x86_64-2.7/PyQuante $SITE_PKGS/PyQuante
+
+# PyQuante v2
+git clone https://github.com/rpmuller/pyquante2.git
+(cd pyquante2 && python setup.py build)
+ln -s $CHEM/pyquante2/build/lib.linux-x86_64-2.7/pyquante2 $SITE_PKGS/pyquante2

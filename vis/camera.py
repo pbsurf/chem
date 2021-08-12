@@ -1,5 +1,5 @@
 import numpy as np
-from glutils import *
+from .glutils import *
 
 
 # Arcball camera class taken from Chemlab

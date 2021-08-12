@@ -15,7 +15,7 @@ import numpy as np
 import os, subprocess, copy
 
 from ..basics import setattrs
-from ..molecule import Atom, Residue, Molecule, guess_bonds, remove_atoms, get_header
+from ..molecule import Atom, Residue, Molecule, guess_bonds, get_header
 from ..data.elements import ELEMENTS
 from ..data.pdb_bonds import *
 
@@ -49,7 +49,7 @@ def apply_pdb_bonds(mol):
     if residue.name in PDB_PROTEIN and 'H1' in name_to_idx and 'H' not in name_to_idx:
       name_to_idx['H'] = name_to_idx.pop('H1')
     # iterate over name_to_idx instead of resatoms to handle '-C', etc correctly
-    for n0, i0 in name_to_idx.iteritems():
+    for n0, i0 in name_to_idx.items():
       if n0 in stdbonds:
         mol.atoms[i0].mmconnect.extend([name_to_idx[n1] for n1 in stdbonds[n0] if n1 in name_to_idx])
       elif residue.name != 'HOH':
@@ -172,7 +172,7 @@ def parse_pdb(PDB, fix_tinker=True, hydrogens=False, alt_loc='A'):
   lines = PDB.splitlines() if '\n' in PDB else open(PDB, 'r')
   for line in lines:
     if line.startswith('ENDMDL') or (line.strip() == 'END' and len(mol.atoms) > 0):
-      mol = remove_atoms(mol, [ii for ii,a in mol.enumatoms() if a.znuc == 0])
+      mol = mol.remove_atoms([ii for ii,a in mol.enumatoms() if a.znuc == 0])
       mol = fix_tinker_pdb(mol) if is_tinker and fix_tinker else mol
       mols.append(copy_residues(hydrogens[len(mols)], mol) if hydrogens else apply_pdb_bonds(mol))
       mol = Molecule()
@@ -264,12 +264,11 @@ def parse_pdb(PDB, fix_tinker=True, hydrogens=False, alt_loc='A'):
 
 ## writing
 
-def write_pdb(mol, filename, r=None, title=None, format='TINKER'):
+def write_pdb(mol, filename=None, r=None, title=None, format='TINKER'):
   """ write molecule as PDB file; residues missing a PDB residue number will be assigned to chain Z """
   lines = ["HEADER    %s\nCOMPND\nSOURCE\nREMARK   1 FORMAT: %s\n" % (title or get_header(mol), format)]
   idx_to_serial = []
   serial = 1
-  resnum_z = 1  # for atoms missing PDB residue number
   r = mol.r if r is None else r
   for ii,atom in mol.enumatoms():
     res = mol.residues[atom.resnum]
@@ -292,8 +291,7 @@ def write_pdb(mol, filename, r=None, title=None, format='TINKER'):
     if res.pdb_num:
       pdb_id = res.pdb_num + ' ' if res.pdb_num[-1].isdigit() else res.pdb_num
     else:
-      pdb_id = str(resnum_z) + ' '
-      resnum_z += 1
+      pdb_id = str(atom.resnum + 1) + ' '  # trailing space is for the insertion code column
     lines.append("%-6s%5d %-4s %3s %1s%5s   %8.3f%8.3f%8.3f%6.2f%6.2f          %2s\n" % (hetatm, serial,
         name, resname, res.chain or 'Z', pdb_id, r[ii][0], r[ii][1], r[ii][2], 1.0, 0.0, sym))
     idx_to_serial.append(serial)
@@ -301,7 +299,7 @@ def write_pdb(mol, filename, r=None, title=None, format='TINKER'):
     try: nextres = mol.residues[mol.atoms[ii+1].resnum]
     except: nextres = None
     if not res.het and (not nextres or nextres.het or nextres.chain != res.chain):
-      lines.append("TER   %5d      %3s %1s%4s\n" % (serial, resname, res.chain, res.pdb_num))
+      lines.append("TER   %5d      %3s %1s%5s\n" % (serial, resname, res.chain or 'Z', pdb_id))
       serial += 1
   # CONECT records for HETATMs and disulfides
   for ii, atom in mol.enumatoms():
@@ -320,5 +318,7 @@ def write_pdb(mol, filename, r=None, title=None, format='TINKER'):
       if sg2:
         lines.append("CONECT%5d%5d\n" % (idx_to_serial[ii], idx_to_serial[sg2]))
   lines.append("END\n")
+  if filename is None:
+    return "".join(lines)
   with open(filename, 'w') as f:
     f.write("".join(lines))

@@ -1,7 +1,8 @@
 #!/bin/bash
 
 if [ "$#" -ne 1 ]; then
-  echo "Usage: `getpdb WXYZ`, where WXYZ is 4 letter PDB id"
+  echo "Usage: 'getpdb WXYZ', where WXYZ is 4 letter PDB id"
+  exit 1
 fi
 
 # PDB ftp is case-sensitive and uses lowercase; ${VAR,,} works in Bash 4+

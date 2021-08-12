@@ -99,7 +99,7 @@ def tinker_E_breakdown(mol, key, r=None, sel=None, prefix=None, cutoff=5.0):
       active = select_atoms(mol, sel)
       f.write("\n".join("active  " + " ".join("%d" % x for x in chunk) for chunk in chunks(active, 10)))
 
-  # for some reason Tinker analuze D prints bond and angle terms to stderr instead of stdout
+  # for some reason Tinker analyze D prints bond and angle terms to stderr instead of stdout
   s = subprocess.check_output([os.path.join(TINKER_PATH, "analyze"), mminp, "D"], stderr=subprocess.STDOUT)
   Eindv = read_tinker_interactions(s)
   if cleanup:

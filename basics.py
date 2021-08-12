@@ -1,4 +1,4 @@
-import math, collections
+import math, collections, time
 import numpy as np
 
 
@@ -16,7 +16,7 @@ class Bunch(dict):
 
 def setattrs(obj, **kwargs):
   """ set one or more attributes of object `obj` from `kwargs` and return `obj` """
-  for k,v in kwargs.iteritems():
+  for k,v in kwargs.items():
     setattr(obj, k, v)
   return obj
 
@@ -79,13 +79,66 @@ def islist(x):
   return safelen(x) >= 0
 
 
-def skiptoline(f, line, extra=0):
+def skiptoline(f, line, extra=0, strip=False):
   l = f.readline()
-  while l and l[:len(line)] != line:
+  while l and not (l.strip() if strip else l).startswith(line):  #l[:len(line)] != line:
     l = f.readline()
   for _ in range(extra):
     l = f.readline()
   return l
+
+
+def read_only(*args):
+  """ make passed numpy arrays read-only """
+  for a in args:
+    a.flags.writeable = False
+  return args
+
+
+# clock() doesn't seem to include time of any external processes run
+def benchmark(fn):
+  """ simple benchmark for single run of a slow function - use timeit for all other cases """
+  c0, t0 = time.clock(), time.time()
+  res = fn()
+  print("clock(): %fs; time(): %fs" % (time.clock() - c0, time.time() - t0))
+  return res
+
+
+def read_file(filename):
+  with open(filename, 'r') as f:
+    return f.read()
+
+
+def write_file(filename, contents):
+  with open(filename, 'w') as f:
+    f.write(contents)
+
+
+## plotting
+# `echo "backend: Qt4Agg" >> ~/.config/matplotlib/matplotlibrc` OR do matplotlib.use('Qt4Agg') to prevent
+#  crashes with default TkAgg backend when using with Chemvis
+
+# can't have keyword args after *args in Python 2!
+def plot(*args, **kwargs):
+  """ Pass x,y pairs, then optional keyword args: xlabel, ylabel, title, legend. For subplots, pass shape as
+    subplots=(rows, cols) and subplot=index (ordered left to right, top to bottom, from 0)
+  """
+  import matplotlib.pyplot as plt
+  subplot = kwargs.get('subplot', None)
+  subplots = kwargs.get('subplots', None)
+  if not subplot:  # None or 0 (first subplot)
+    plt.ion()  # interactive mode - make plot window non-blocking
+    plt.figure()
+  if subplots is not None:
+    plt.subplot(subplots[0], subplots[1], subplot+1)
+  plt.plot(*args, picker=kwargs.get('picker', None))
+  if 'xlabel' in kwargs: plt.xlabel(kwargs['xlabel'])
+  if 'ylabel' in kwargs: plt.ylabel(kwargs['ylabel'])
+  if 'title' in kwargs: plt.title(kwargs['title'])
+  if 'legend' in kwargs: plt.legend(kwargs['legend'])
+  if not subplot:
+    plt.show()
+  return plt.gcf()
 
 
 ## math
@@ -100,23 +153,65 @@ def normalize(v):
     raise Exception("Cannot normalize() null vector")
   return v/n
 
+# note that this gives us rms(norm(r, axis=1)) for an array of vectors ... rename to rmsnorm()?
 def rms(v):
-  return np.sqrt(np.sum(v*v)/len(v))  # np.sqrt(np.mean(v*v, axis=axis)
+  return np.sqrt(np.sum(v*v)/len(v))  # not equivalent: np.sqrt(np.mean(v*v, axis=axis)
+
+def get_extents(r, pad=0.0):
+  """ return extents of box containing all points r, with optional padding pad """
+  return np.array([np.amin(r, axis=0) - pad, np.amax(r, axis=0) + pad])
 
 # affine transformations
 # these are transposed from rotation_matrix() and translation_matrix() in glutils ... would be nice to unify
 
-def rotation_matrix(direction, angle):
+def skew_matrix(a):
+  """ Given 3-vector a, returns [a]_\cross, the matrix such that [a]_\cross . b = a \cross b for any b """
+  return np.array([[    0, -a[2],  a[1]],
+                   [ a[2],     0, -a[0]],
+                   [-a[1],  a[0],    0]])
+
+
+# Using rotation matrices: R.dot(x) for single (column) vector x; x.dot(R.T) for array of vectors x (since R
+#  is unitary, R.T == R^-1)
+
+# we'll keep this separate from expmap_rot for now since derivative is wrt angle instead of rot vector
+def rotation_matrix(direction, angle, grad=False):
   """ Create a rotation matrix for rotation around an axis `direction` (d) by `angle` (a) radians:
    R = dd^T + cos(a) (I - dd^T) + sin(a) skew(d)
   """
   d = normalize(direction)
   ddt = np.outer(d, d)
-  skew = np.array([[    0,  d[2], -d[1]],
-                   [-d[2],     0,  d[0]],
-                   [ d[1], -d[0],    0]])
-  # ---
-  return ddt + np.cos(angle) * (np.eye(3) - ddt) + np.sin(angle) * skew
+  skew = skew_matrix(d)  # -d ... whoops, afraid to change it now
+  R = ddt + np.cos(angle)*(np.eye(3) - ddt) + np.sin(angle)*skew
+  return R if not grad else (R, -np.sin(angle)*(np.eye(3) - ddt) + np.cos(angle)*skew)
+
+
+# Exponential map representation of a rotation is axis-angle rep. w/ the length of vector equal to the angle
+#  instead of one.  For an infinitesimal rotation d_ang about unit vector d, R = I + skew(d)*d_ang, so for
+#  a general rotation, R = exp(skew(d)*ang).  Then with ang = norm(v) and d = v/norm(v),
+# R = exp(skew(v)) = I + sin(ang)*skew(d) + (1 - cos(ang))*skew(d)**2
+#   = d.dt + cos(ang)*(I - d.dt) + sin(ang)*skew(d)  (note d.dt = np.outer(d,d))
+# This is equivalent to the Euler-Rodrigues rotation formula
+# Refs:
+#  1. arxiv.org/pdf/1312.0788.pdf (Gallego, Yezzi)
+#  2. rotations.berkeley.edu/other-representations-of-a-rotation
+#  3. en.wikipedia.org/wiki/Rotation_formalisms_in_three_dimensions
+def expmap_rot(v, grad=False):
+  """ return rotation matrix R for rotation by norm(v) around axis v and, if grad==True, derivatives of R wrt
+    components of v
+  """
+  I = np.eye(3)
+  angle = norm(v)
+  if angle == 0:
+    return (I, [skew_matrix(ei) for ei in I]) if grad else I  # Ref 1.: sec. 3.3
+  d = v/angle
+  ddt = np.outer(d, d)
+  R = ddt + np.cos(angle)*(I - ddt) + np.sin(angle)*skew_matrix(d)
+  if not grad:
+    return R
+  dR = np.array([  # note we also use I[i] to get basis vectors; Ref. 1, eq. 9
+      (v[i]*skew_matrix(v) + skew_matrix(np.cross(v, (I - R).dot(I[i])))).dot(R)/angle**2 for i in [0,1,2] ])
+  return R, dR
 
 
 def translation_matrix(dr):
@@ -141,14 +236,51 @@ def apply_affine(M, v):
   return np.dot(v, M[:3, :3]) + M[3, :3]
 
 
+def random_direction(rand=None):
+  #return normalize(np.random.randn(3))  # randn: normal (Gaussian) distribution
+  rand = np.random.random(2) if rand is None else rand
+  cos_theta = 2*rand[0] - 1
+  sin_theta = np.sin(np.arccos(cos_theta))  #np.sqrt(1 - cos_theta**2)
+  phi = 2*np.pi*rand[1]
+  return [sin_theta*np.cos(phi), sin_theta*np.sin(phi), cos_theta]
+
+
 def random_rotation(rand=None):
   """ ref: https://math.stackexchange.com/questions/442418 """
   rand = np.random.random(3) if rand is None else rand
-  cos_theta = 2*rand[0] - 1
-  sin_theta = np.sin(np.arccos(cos_theta))
-  phi = 2*np.pi*rand[1]
-  direction = [sin_theta*np.cos(phi), sin_theta*np.sin(phi), cos_theta]
-  return rotation_matrix(direction, 2*np.pi*rand[2])
+  return rotation_matrix(random_direction(rand[0:2]), 2*np.pi*rand[2])
+
+
+def align_vector(subject, ref):
+  """ return rotation matrix to align subject vector to ref vector """
+  v = np.cross(subject, ref)
+  if norm(v) == 0:
+    v = [ref[1], -ref[0], 0] if abs(ref[2]) < abs(ref[0]) else [0, -ref[2], ref[1]]  # orthogonal vector
+  return rotation_matrix(v, np.arccos(np.dot(subject, ref)/norm(subject)/norm(ref)))
+
+
+def align_axes(subject, ref):
+  """ return rotation matrix to align two orthogonal subject vectors to two orthogonal ref vectors """
+  R0 = align_vector(subject[0], ref[0])
+  R1 = align_vector(np.dot(R0, subject[1]), ref[1])
+  return np.dot(R1, R0)
+
+
+# moment of inertia
+def moment_inertia(r, m):
+  """ calculate moment of inertia tensor (about center of mass) for masses m at positions r """
+  r = r - np.einsum('z,zr->r', m, r)/np.sum(m)
+  return np.eye(3)*np.einsum('z,zr,zr', m, r, r) - np.einsum('z,zr,zs->rs', m, r, r)
+
+
+def principal_axes(I, moments=False):
+  """ diagonalize moment of inertia tensor I to return principle axes and moments """
+  # as usual, we assume eigh eigenvalues are sorted despite documentation
+  ev, evec = np.linalg.eigh(I)
+  evec = evec.T
+  if np.dot(np.cross(evec[0], evec[1]), evec[2]) < 0:  # ensure right-handed axes
+    evec *= -1
+  return (ev, evec) if moments else evec
 
 
 ## geometry related fns
@@ -162,7 +294,7 @@ def calc_dist(v1, v2=None, grad=False):
   if not grad:
     return l
   dl1 = (v1 - v2)/l
-  return l, [dl1, -dl1]
+  return l, np.array([dl1, -dl1])
 
 
 def calc_angle(v1, v2=None, v3=None, grad=False):
@@ -189,11 +321,12 @@ def calc_angle(v1, v2=None, v3=None, grad=False):
   da3 = (-v12 + v23*dot1223/d23sq)/denom
   # translation of one atom (e.g. middle atom) by delta is equiv to translation of other two atoms by -delta
   da2 = -da1 - da3
-  return deg, [da1, da2, da3]
+  return deg, np.array([da1, da2, da3])
 
 
 # TODO: need to handle v123 or v234 null, although not sure we'll encounter this in practice
 # Note: all the signs in the gradient calculation were determined by trial and error, not careful algebra
+# - can be checked with EandG_sanity(lambda x: calc_dihedral(x, grad=True), np.random.rand(4,3))
 def calc_dihedral(v1, v2=None, v3=None, v4=None, grad=False):
   """ return dihedral angle - angle between planes defined by points 1,2,3 and 2,3,4 - and optionally gradient
     refs: Wilson, Mol. Vibrations (1955), ch. 4; JCC 17, 1132 (via Wikipedia)
@@ -223,7 +356,7 @@ def calc_dihedral(v1, v2=None, v3=None, v4=None, grad=False):
   # translation of one atom by delta is equiv to translation of all others by -delta
   dd3 = -(dd1 + dd2 + dd4)
   # note that we do not reverse sign of the gradient when the the sign of dihed is reversed
-  return dihed, [dd1, dd2, dd3, dd4]
+  return dihed, np.array([dd1, dd2, dd3, dd4])
 
 
 # this was created to try using instead of calc_dihedral for DLCs ... but gradient -> 0 at 0 and 180 deg
@@ -249,7 +382,7 @@ def cos_dihedral(v1, v2=None, v3=None, v4=None, grad=False):
   dd4 = np.cross(v32, b)  # typo in reference!
   dd2 = np.cross(v1 - v3, a) - np.cross(v34, b)
   dd3 = np.cross(v2 - v4, b) - np.cross(v12, a)
-  return cosdihed, [dd1, dd2, dd3, dd4]
+  return cosdihed, np.array([dd1, dd2, dd3, dd4])
 
 
 ## constants
@@ -261,31 +394,10 @@ def cos_dihedral(v1, v2=None, v3=None, v4=None, grad=False):
 # Coulomb energy (Hartree): q_1*q_2/norm(r_2 - r1) - where r is in *Bohr* NOT Angstrom
 
 # https://physics.nist.gov/cgi-bin/cuu/Value?bohrrada0
-ANGSTROM_PER_BOHR = 0.52917721067
-KJMOL_PER_HARTREE = 2625.499638
-KCALMOL_PER_HARTREE = 627.509391
+ANGSTROM_PER_BOHR = 0.52917721067  # 2018 value is 0.529177210903
+KJMOL_PER_HARTREE = 2625.499639
+KCALMOL_PER_HARTREE = 627.5094740631  # updated CODATA 2018; was 627.509391
 EV_PER_HARTREE = 27.2113845
 AVOGADRO = 6.02214076E23  # exact value as of Nov 2018
+BOLTZMANN = 1.380649e-23/4.3597447222071e-18  # J/K / J/Hartree
 # recall that kB*T ~ 2.5 kJ/mol at 300K
-
-
-# inc() and dec() were introduced to translate between 1-based atom indexing of most comp. chem. software
-#  and 0-based indexing of python ... but for real work, it seems we're rarely specifying atoms explicitly
-#  by index, so perhaps these should be removed
-
-#~ def dec(*args):
-#~   """ convert from 1-based to 0-based indexing for internal use by molecule object, etc """
-#~   return [_dec(x) for x in args]
-
-#~ def _dec(x):
-#~   try: return [_dec(y) for y in x]
-#~   except: return x - 1
-
-
-#~ def inc(*args):
-#~   """ convert from 0-based to 1-based indexing for printing """
-#~   return [_inc(x) for x in args]
-
-#~ def _inc(x):
-#~   try: return [_inc(y) for y in x]
-#~   except: return x + 1

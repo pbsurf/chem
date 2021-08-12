@@ -1,12 +1,11 @@
 import numpy as np
-from itertools import cycle
 from OpenGL.GL import *
 from OpenGL.arrays.vbo import VBO
-from glutils import *
-from shading import *
-from color import *
+from .glutils import *
+from .shading import *
+from .color import *
 from ..data.elements import ELEMENTS
-from ..molecule import decode_atom_sel, select_atoms
+from ..molecule import select_atoms
 
 # Refs:
 # - pymol (w/ caps): https://sourceforge.net/p/pymol/code/HEAD/tree/trunk/pymol/data/shaders/cylinder.fs
@@ -604,7 +603,8 @@ class VisGeom:
     """
     self.radius = radius
     self.style = style
-    self.mol_styles = cycle(['licorice', 'spacefill', 'lines'])
+    self.mol_styles = ['licorice', 'spacefill', 'lines']  # too hard to set initial style w/ itertools.cycles
+    self.style_idx = self.mol_styles.index(style) if style in self.mol_styles else 0
     self.coloring = (lambda *args: coloring(*args, colors=colors)) if colors is not None else coloring
     self.sel = sel
     self.stick_renderer = StickRenderer() #ordered_draw=(opacity < 1.0))
@@ -688,7 +688,7 @@ class VisGeom:
       active atoms will be rendered
     """
     self.mol = mol
-    r_array = mol.r if r is None else r
+    self.r = mol.r if r is None else r
     atomnos, bonds, dbl_bonds = mol.znuc, mol.bonds, [] #mol.dbl_bonds()
     # we're no longer caching result of decode_atom_sel(sel) so sel can be updated
     self.active = select_atoms(mol, self.sel) if self.sel and active is None else active
@@ -699,14 +699,14 @@ class VisGeom:
         activeset = frozenset(self.active)  # critical for performance
         bonds = [b for b in bonds if b[0] in activeset and b[1] in activeset]
         dbl_bonds = [b for b in dbl_bonds if b[0] in activeset and b[1] in activeset]
-      cyl_bounds, cyl_radii, cyl_colors = self.cylinder_data(mol, bonds, r_array, atomnos, dbl_bonds, radius)
+      cyl_bounds, cyl_radii, cyl_colors = self.cylinder_data(mol, bonds, self.r, atomnos, dbl_bonds, radius)
       if self.style == 'licorice':
         self.stick_renderer.set_data(cyl_bounds, cyl_radii, cyl_colors)
       elif self.style == 'lines':
         # draw a 3D cross (axis-aligned) for any lone atoms in lines representation; make this optional?
         bonded_atoms = frozenset([a for bond in bonds for a in bond])
         lone_bounds = []
-        for ii, r in enumerate(r_array):
+        for ii, r in enumerate(self.r):
           if ii not in bonded_atoms and (self.active is None or ii in activeset):
             cr = ELEMENTS[atomnos[ii]].cov_radius if atomnos[ii] > 0 else 0.5
             lone_bounds.append(np.array([[r + [cr, 0, 0], r - [cr, 0, 0]]]))
@@ -717,26 +717,27 @@ class VisGeom:
         cyl_bounds = np.concatenate((cyl_bounds, np.concatenate(lone_bounds))) if lone_bounds else cyl_bounds
         self.line_renderer.set_data(cyl_bounds, cyl_radii, cyl_colors)
     if self.style in ['spacefill', 'licorice']:
-      active = range(len(r_array)) if self.active is None else self.active
+      active = range(len(self.r)) if self.active is None else self.active
       ball_colors = [self.coloring(mol, ii) for ii in active]
       if self.style == 'spacefill':
         ball_radii = [self.radius*ELEMENTS[mol.atoms[ii].znuc].vdw_radius for ii in active]
       else:
         ball_radii = [radius]*len(active)
-      self.ball_renderer.set_data(r_array[active], ball_radii, ball_colors)
+      self.ball_renderer.set_data(self.r[active], ball_radii, ball_colors)
     return self
 
 
   def on_key_press(self, viewer, keycode, key, mods):
     if key == 'M':
       # toggle molecule rendering method
-      self.style = next(self.mol_styles)
-      self.set_molecule(self.mol)  # force refresh
+      self.style_idx = (self.style_idx + 1) % len(self.mol_styles)
+      self.style = self.mol_styles[self.style_idx]
+      self.set_molecule(self.mol, self.r, self.active)  # force refresh
       print("Molecule style: %s" % self.style)
     elif key in 'ER':
       self.radius *= np.power((1.25 if key == 'R' else 0.8), (10 if 'Shift' in mods else 1))
       # TODO: radius scale should be a shader uniform so we don't have to refresh!
-      self.set_molecule(self.mol)
+      self.set_molecule(self.mol, self.r, self.active)
       print("Radius (scale): %0.3f" % self.radius)
     else:
       return False

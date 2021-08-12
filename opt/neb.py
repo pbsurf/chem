@@ -6,6 +6,8 @@
 # - 10.1021/ct060032y - succinct overview of NEB (w/ applications to gas-phase reactions)
 # - 10.1063/1.1329672 - climbing-image NEB (orig paper)
 # - 10.1063/1.2841941 - shows optimizing all images together (allowing cross-image Hessian elements) is better
+#  - also argues that problems with quasi-Newton methods from pathological Hessian due to NEB modification
+#  of forces as discussed in 10.1063/1.1627754 are not an issue in practice
 
 # NEB procedure
 # 1. given optimized reactant and product states (R and P) defining ends of reaction path...
@@ -37,19 +39,19 @@
 
 import numpy as np
 from numpy.linalg import norm
-from ..molecule import align_atoms
 
-# If this has difficulty with complex system or reaction, try dlc_interp() (in ts_test.py)
+# If this has difficulty with complex system or reaction, try dlc_interp() (in theo.py)
 # - DL-FIND suggests DLC-TC for interp, cartesian for optimization
+# This is only needed for numpy < v1.16 (after which np.linspace can be used)
 def linear_interp(R, P, nimages):
   """ Linear interpolation between geometries R and P """
   dr = (P - R)/(nimages - 1)
-  return R[None,...] + dr[None,...]*np.arange(nimages)[...,None,None]
+  return R[None,...] + dr[None,...]*np.arange(nimages).reshape((-1,) + (1,)*np.ndim(dr))
 
 
 class NEB:
 
-  def __init__(self, R, P, EandG, nimages=8, k=1.0, climb=False, verbose=True):
+  def __init__(self, R, P, EandG, nimages=8, k=1.0, climb=False, verbose=True, hist=None):
     """ R: reactant state, P: product state - coordinates
     EandG: fn to return energy and gradient for a single image when passed coordinates
     nImages: number of points (images) along band, including R and P
@@ -58,10 +60,9 @@ class NEB:
     """
     self.imgEandG = EandG
     self.k = k  # if k else (EandG(P) - EandG(R))/norm(P - R)
-    self.align = align
     self.climb = climb
-    self.nimages = nimages
     self.verbose = verbose
+    self.hist = hist
     # create initial images along band via linear interpolation between R and P
     #  I think this is the same as least linear motion (LLM) path
     self.images = linear_interp(R, P, nimages)
@@ -82,20 +83,24 @@ class NEB:
 
   def EandG(self, xyzs):
     """ Given new coordinates for active images, return energy of highest image and gradient """
-    energies = [0]*self.nimages
-    grads = [0]*self.nimages
+    nimages = len(self.images)
+    energies = [0]*nimages
+    grads = [0]*nimages
+    # optionally save previous images
+    if self.hist is not None:
+      self.hist.append(np.array(self.images))
     # partition new coordinate vector into images
-    self.images[1:-1] = np.reshape(xyzs, (self.nimages - 2, -1, 3))
-    for ii in range(1, self.nimages - 1):
+    self.images[1:-1] = np.reshape(xyzs, np.shape(self.images[1:-1]))  #(self.nimages - 2, -1, 3))
+    for ii in range(1, nimages - 1):
       energies[ii], grads[ii] = self.imgEandG(self.images[ii])
 
     imax = np.argmax(energies[1:-1]) + 1
     self.emax = energies[imax]
 
     tangent1 = self.images[1] - self.images[0]
-    for ii in range(1, self.nimages-1):
+    for ii in range(1, nimages-1):
       tangent2 = self.images[ii+1] - self.images[ii]
-      # choose "uphill" tangent ... should be check energies[ii+/-1] to handle path w/ >1 maxima?
+      # choose "uphill" tangent ... should we check energies[ii+/-1] to handle path w/ >1 maxima?
       tangent = (tangent1 if ii >= imax else 0) + (tangent2 if ii <= imax else 0)
       tandir = tangent/norm(tangent)
       gt = np.vdot(grads[ii], tandir)

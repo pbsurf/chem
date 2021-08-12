@@ -1,21 +1,24 @@
 # Tinker interface
 
 import numpy as np
-import os, subprocess, time
-from cStringIO import StringIO
+import os, subprocess, time, sys
+if sys.version_info >= (3, 0):
+  from io import StringIO
+else:
+  from cStringIO import StringIO
 
 from ..basics import *
-from ..molecule import Atom, Molecule, get_header
+from ..molecule import Atom, Residue, Molecule, get_header
 from ..data.elements import ELEMENTS
 
 
 TINKER_PATH = os.getenv('TINKER_PATH')
 
 # TODO: support multiple concatenated xyz files (aka Tinker archive)
-def parse_xyz(xyz, charges=None):
-  """ XYZ data read from file or string `xyz`. Tinker and generic (name and position only) xyz is
-    supported.  MM charges will be read from `charges` or a ".charges" file if present, assumed to contain
-    lines of the form "<index> <don't care> <MM force field charge>"
+def parse_xyz(xyz, inorganic=False):
+  """ create Molecule from file or string `xyz` with format: [index] name x y z [mm_type [mm_charge] bonded]
+    first line: natoms [comment]; second line: first atom, comment, blank, or PBC box; "Cl, Ca, Na, etc.
+    interpreted as carbon, nitrogen unless inorganic==True
   """
   # xyz file
   if '\n' in xyz:
@@ -28,75 +31,170 @@ def parse_xyz(xyz, charges=None):
   natoms = int(l[0])
   header = l[1].strip() if len(l) > 1 else ''
   l = fxyz.readline().split()
+  mol = Molecule(header=header)
   # for generic (non-Tinker) xyz, line 2 is comment; for Tinker xyz with periodic box, line 2 specifies box
   #  and values contain '.', for which isdigit() returns False
-  if not l[0].isdigit():
+  if not l or not l[0].isdigit():
+    try: mol.pbcbox = np.array([float(w) for w in l][:3])  # Tinker PBC: a b c angle_a angle_b angle_c
+    except: pass
     l = fxyz.readline().split()
   # Tinker xyz doesn't necessarily start atom numbering at 1
-  offset = int(l[0])
-  # charge file is optional
-  fq = None
-  q = [0, 0, 0]
-  if charges == 'generate':
-    analysis = subprocess.check_output([os.path.join(TINKER_PATH, 'analyze'), filename, 'P'])
-    idx = analysis.find('Atomic Partial Charge Parameters :')
-    charges = analysis[idx:]
-  if charges is not None:
-    fq = StringIO(charges)
-  elif filename is not None:
-    try:
-      charge_file = '.'.join(filename.split('.')[:-1]) + '.charges'
-      fq = open(charge_file, 'r')
-    except IOError: pass
-  if fq:
-    # skip to first charge
-    lq = fq.readline()
-    while lq and not lq.strip().startswith('1'):
-      lq = fq.readline()
-    q = lq.split()
-
-  mol = Molecule()
-  while len(l) > 3 and len(q) > 2:
+  offset = int(l[0]) if l[0].isdigit() else 1
+  last_res_id, last_chain_id = None, None  # for our xyz + pdb hack
+  while len(l) > 3:
     if len(l) == 4:
       # to support generic xyz format
       l = [0] + l + [0]
-    # (some) xyz files use forcefield atom name, which may include extra characters
-    elem = l[1][0] if l[1][0] in 'HCNOS' else l[1]
+    name = l[1]
+    if '_' in name:
+      # support our hack cramming residue info in atom name (Tinker ignores name, just needs line len < 120)
+      extname = name.split('_')
+      is_hetatm = name.endswith('_')
+      name, res_type, chain_id, res_id = ([s for s in extname if s] + [None]*4)[:4]
+      elem = name.title() if is_hetatm else name[0]  # convert to title case for lookup
+      if res_id != last_res_id or chain_id != last_chain_id:
+        last_res_id, last_chain_id = res_id, chain_id
+        mol.residues.append(Residue(name=res_type, pdb_num=res_id, chain=chain_id, het=is_hetatm))
+      mol.residues[-1].atoms.append(len(mol.atoms))  # haven't added atom yet
+    else:
+      # (some) xyz files use forcefield atom name, which may include extra characters
+      elem2 = name[:2].title()
+      elem = elem2[0] if elem2[0] in 'HCNOPS' and (elem2 not in ELEMENTS or not inorganic) else elem2
+    has_mmq = len(l) > 6 and not l[6].isdigit()  # float at l[6] is MMQ
     mol.atoms.append(Atom(
-      name=l[1],
+      name=name,
       r=np.array(l[2:5], 'd'),
-      znuc=ELEMENTS[elem].number,
-      mmq=float(q[2]),
-      mmtype=int(l[5]),
+      znuc=ELEMENTS[elem].number if elem in ELEMENTS else 0,
+      mmtype=(int(l[5]) if l[5].isdigit() else l[5]) if len(l) > 5 else 0,
+      mmq=float(l[6]) if has_mmq else 0.0,
       # note conversion to zero-based indexing
-      mmconnect=[int(x) - offset for x in l[6:]]
+      mmconnect=[int(x) - offset for x in l[(7 if has_mmq else 6):]],
+      resnum=len(mol.residues) - 1 if mol.residues else None
     ))
     l = fxyz.readline().split()
-    q = fq.readline().split() if fq else q
-  mol.header = header
+
   if len(mol.atoms) != natoms:
-    print("Warning: only %d atoms found in xyz file but %d expected" % (len(mol.atoms), natoms))
-  # ---
+    print("Warning: %d atoms found in xyz file but %d expected" % (len(mol.atoms), natoms))
   fxyz.close()
-  if fq:
-    fq.close()
   return mol
 
 
+def load_tinker_params(mol, filename=None, key=None, charges=True, vdw=False, bonded=False):
+  """ set .mmq and/or .lj_r0,.lj_eps attributes on atoms of mol """
+  cleanup = False
+  if filename is None:
+    prefix = "mmtmp_%d" % time.time()
+    filename = prefix + ".xyz"
+    # don't need bonds to get charge or vdW params
+    write_tinker_xyz(mol, filename, noconnect=(None if bonded else mol.listatoms()))
+    if key is not None:
+      mmkey = prefix + ".key"
+      write_tinker_key(key, mmkey)
+    elif not os.path.exists('tinker.key'):
+      raise ValueError("Tinker key not specified and tinker.key not present!")
+    cleanup = True
+
+  analysis = subprocess.check_output([os.path.join(TINKER_PATH, 'analyze'), filename, 'P'])
+  f = StringIO(analysis)
+  try:
+    UNIT = 1.0/KCALMOL_PER_HARTREE
+    if bonded:
+      mol.mm_stretch, mol.mm_bend, mol.mm_torsion, mol.mm_imptor = [], [], [], []
+      skiptoline(f, ' Bond Stretching Parameters :')
+      b = skiptoline(f, '1', strip=True).split()
+      while len(b) > 2:
+        if len(b) > 4:
+          mol.mm_stretch.append(( [int(b[1])-1, int(b[2])-1], float(b[3])*UNIT, float(b[4]) ))
+        b = f.readline().split()
+      l = f.readline().strip()
+
+      if l == 'Angle Bending Parameters :':
+        b = skiptoline(f, '1', strip=True).split()
+        while len(b) > 3:
+          if len(b) > 5:
+            mol.mm_bend.append(( [int(b[1])-1, int(b[2])-1, int(b[3])-1], float(b[4])*UNIT, float(b[5])*np.pi/180 ))
+          b = f.readline().split()
+        l = f.readline().strip()
+
+      if l == 'Improper Torsion Parameters :':
+        b = skiptoline(f, '1', strip=True).split()
+        while len(b) > 4:
+          if len(b) > 7:
+            mol.mm_imptor.append(( [int(b[1])-1, int(b[2])-1, int(b[3])-1, int(b[4])-1],
+                [(float(b[5])*UNIT, float(b[6])*np.pi/180, float(b[7]))] ))
+          b = f.readline().split()
+        l = f.readline().strip()
+
+      if l == 'Torsional Angle Parameters :':
+        b = skiptoline(f, '1', strip=True).split()
+        while len(b) > 4:
+          if len(b) > 6:
+            terms = []
+            for amp,pps in chunks(b[5:], 2):
+              pp = pps.split('/')
+              terms.append( (float(amp)*UNIT, float(pp[0])*np.pi/180, float(pp[1])) )  # amplitude, phase, periodicity
+            mol.mm_torsion.append( ([int(b[1])-1, int(b[2])-1, int(b[3])-1, int(b[4])-1], terms) )
+          b = f.readline().split()
+        l = f.readline().strip()
+    else:
+      skiptoline(f, ' Van der Waals Parameters :')
+
+    if vdw:
+      line = skiptoline(f, '1', strip=True)
+      for atom in mol.atoms:
+        lj = line.split()
+        atom.lj_r0 = 2.0*float(lj[2])  # "Size" from Tinker is r0/2
+        atom.lj_eps = float(lj[3])*UNIT
+        line = f.readline()
+    else:
+      skiptoline(f, ' Atomic Partial Charge Parameters :')
+
+    if charges:
+      line = skiptoline(f, '1', strip=True)
+      for atom in mol.atoms:
+        q = line.split()
+        atom.mmq = float(q[2])
+        line = f.readline()
+  except:
+    print("Error getting MM params: Tinker analyze failed:\n\n" + analysis)
+    raise
+
+  if cleanup:
+    try:
+      os.remove(filename)
+      if key is not None:
+        os.remove(mmkey)
+    except: pass
+
+
 # simple xyz reader to read just geometry from xyz file
-def read_tinker_geom(filename):
-  """ Read cartesian geom from TINKER .xyz file """
-  XYZ = []
+def read_tinker_geom(filename, pbc=False, last=False):
+  """ Read all (or only last if `last` is True) geometries from TINKER .xyz or .arc file """
+  XYZs = []
+  PBCs = []
   with open(filename, 'r') as input:
-    input.readline()  # skip first line
     l = input.readline().split()
-    # skip 2nd line if it doesn't start with int
-    if not l[0].isdigit():
+    while True:
+      try:
+        natoms = int(l[0])
+      except:
+        break
       l = input.readline().split()
-    while len(l) > 4:
-      XYZ.append( [float(x) for x in l[2:5]] )
-      l = input.readline().split()
-  return np.array(XYZ)
+      # skip 2nd line if it doesn't start with int
+      if not l[0].isdigit():
+        try: PBCs.append([float(w) for w in l][:3])  # Tinker PBC: a b c angle_a angle_b angle_c
+        except: pass
+        l = input.readline().split()
+      XYZs.append([])
+      for ii in range(natoms): # and len(l) > 4:  -- exception on len(l) < 5
+        XYZs[-1].append( [float(x) for x in l[2:5]] )
+        l = input.readline().split()
+
+  if last:
+    XYZs, PBCs = XYZs[-1], (PBCs[-1] if PBCs else [])
+  elif len(XYZs) == 1 and not filename.endswith(".arc"):
+    XYZs, PBCs = XYZs[0], (PBCs[0] if PBCs else [])
+  return (np.array(XYZs), np.array(PBCs)) if pbc else np.array(XYZs)
 
 
 def read_tinker_energy(input, components=False):
@@ -130,6 +228,9 @@ def read_tinker_grad(input):
   gradstr = " Cartesian Gradient Breakdown over Individual Atoms :"
   f = StringIO(input) if '\n' in input else open(input, 'r')
   line = skiptoline(f, energystr)
+  if not line:
+    print(input)
+    raise ValueError("Unable to read energy from Tinker output")
   E = float(line.split()[4]) / KCALMOL_PER_HARTREE
   skiptoline(f, gradstr, extra=3)
   G = []
@@ -190,7 +291,7 @@ def read_tinker_interactions(input):
     if not tokens:
       break
     type = tokens[0].lower()
-    natoms = dict(angle=3, improper=4, torsion=4).get(type, 2)
+    natoms = dict(angle=3, improper=4, torsion=4, solvate=1).get(type, 2)
     E[type] = {}
     while tokens:
       atoms = tuple(int(a.split('-')[0])-1 for a in tokens[1:1+natoms])
@@ -201,14 +302,34 @@ def read_tinker_interactions(input):
   return E
 
 
-def write_tinker_xyz(mol, filename, r=None, title=None):
-  # since Tinker mmtype > 0, we'll just use bool(mmtype); gap in numbering is OK
+def write_tinker_xyz(mol, filename=None, r=None, noconnect=None, title=None, pdbhack=False):
+  def namehack(a):
+    if not pdbhack or a.resnum is None:
+      return a.name
+    res = mol.residues[a.resnum]
+    #assert a.name.upper().startswith(ELEMENTS[a.znuc].symbol.upper()), "Atom name does not match element!"
+    return "{:_<4}_{}_{}_{}{}".format(ELEMENTS[a.znuc].symbol.upper() if res.het else a.name,  #a.name
+        res.name or 'XXX', res.chain or 'Z', res.pdb_num or (a.resnum + 1), "_" if res.het else "")
+  # idea of noconnect is to omit bonds for (hetatm) qmatoms so we don't need extra Tinker params
+  noconnect = frozenset(noconnect if noconnect else [])
+  def bonded(ii, a):
+    return "" if ii in noconnect else " ".join(["%5d" % (x+1) for x in a.mmconnect])
+
   r = mol.r if r is None else r
-  lines = [" %5d  %-3s %11.6f %11.6f %11.6f %5d %s\n" % ( ii+1, a.name, r[ii][0], r[ii][1], r[ii][2], a.mmtype,
-      " ".join(["%5d" % (x+1) for x in a.mmconnect]) ) for ii, a in mol.enumatoms() if a.mmtype ]
+  fmt = " %5d  %-16s %11.6f %11.6f %11.6f %5s %s\n" if pdbhack else " %5d  %-3s %11.6f %11.6f %11.6f %5d %s\n"
+  # since Tinker mmtype > 0, we'll just use bool(mmtype); gap in numbering is OK
+  lines = [fmt % ( ii+1, namehack(a), r[ii][0], r[ii][1], r[ii][2], a.mmtype, bonded(ii, a) )
+      for ii, a in mol.enumatoms() if a.mmtype or pdbhack ]
+  pbc = ("    %f %f %f 90.0 90.0 90.0\n" % tuple(mol.pbcbox)) if mol.pbcbox is not None else ""
+  lines[0] = ("  %d  %s\n%s" % (len(lines), title or get_header(mol), pbc)) + lines[0]
+  if filename is None:
+    return "".join(lines)
   with open(filename, 'w') as f:
-    f.write("  %d  %s\n" % (len(lines), title or get_header(mol)))
     f.write("".join(lines))
+
+
+def write_xyz(mol, *args, **kwargs):
+  return write_tinker_xyz(mol, *args, pdbhack=True, **kwargs)
 
 
 # inactive atoms are assigned to a group for which intra-group interactions are set to 0; just using inactive
@@ -218,19 +339,24 @@ def write_tinker_key(key, filename, inactive=None, charges=None):
     f.write(key)
     if inactive:
       # tinker only reads first ~100 chars of line, so split group across lines as needed
-      f.write("\n".join("group 1   " + " ".join("%d" % x for x in chunk) for chunk in chunks(inactive, 10)))
+      f.write("\n".join("group 1   " + " ".join("%d" % (x+1) for x in chunk) for chunk in chunks(inactive, 10)))
       f.write("\ngroup-select 1 1 0.0\n\n")
     if charges:
       # negative arg for TINKER charge keyword applies value to individual atoms instead of atom type
-      f.write("".join(["charge %4d %7.3f\n" % (-ii, q) for ii,q in charges]))
+      f.write("".join(["charge %4d %7.3f\n" % (-ii-1, q) for ii,q in charges]))
+
+
+def make_tinker_key(ff='amber96', digits=8):
+  pfile = os.path.abspath(os.path.join(TINKER_PATH, "../params/%s.prm" % ff))
+  return "parameters     %s\ndigits %d\n" % (pfile, digits)
 
 
 # should we take a generic keyopts dict instead of inactive and charges?
 # for grad and components, pass True to calculate, False to skip but include in returns, and None to exclude
 #  from returns ... this is done to ease unpacking
 # An alternative would be to require a dict to passed in to be filled with components
-def tinker_EandG(mol, r=None, prefix=None, key=None, inactive=None, charges=None, title=None,
-    grad=True, components=None, cleanup=False):
+def tinker_EandG(mol, r=None, prefix=None, key=None,
+    inactive=None, charges=None, noconnect=None, title=None, grad=True, components=None, cleanup=False):
   """ return energy and optionally gradient and components of energy of `mol` calculated by Tinker """
   if prefix is None:
     prefix = "mmtmp_%d" % time.time()
@@ -238,10 +364,12 @@ def tinker_EandG(mol, r=None, prefix=None, key=None, inactive=None, charges=None
   mminp = prefix + ".xyz"
   mmkey = prefix + ".key"
 
-  write_tinker_xyz(mol, mminp, r=r, title=title)
+  write_tinker_xyz(mol, mminp, r=r, title=title, noconnect=noconnect)
   # writing key file can be skipped if prefix + ".key" file has already been written
   if key is not None:
     write_tinker_key(key, mmkey, inactive=inactive, charges=charges)
+  else:
+    assert not inactive and not charges, "key must be specified to use inactive atoms or charges"
 
   if grad:
     # Y: yes analytical gradient, N: no numerical gradient, N: no breakdown by component

@@ -44,7 +44,7 @@ def r_grid(extents, sample_density=None, shape=None):
 
 def esp_grid(q, r, grid):
   """ calculate electrostatic potential at `grid` points from charges `q` at positions `r` """
-  return np.sum(q / np.linalg.norm(r - grid[:,None,:], axis=2), axis=1)
+  return np.sum((ANGSTROM_PER_BOHR*q) / np.linalg.norm(r - grid[:,None,:], axis=2), axis=1)
 
 
 # Note this does not give correct valence for transition metals!
@@ -93,21 +93,22 @@ def pyscf_mo_grid(mf, extents, sample_density=10.0, mo_coeff=None, n_calc=None, 
 
 
 # ref: github.com/pyscf/pyscf/blob/master/pyscf/tools/cubegen.py
-def pyscf_esp_grid(mf, extents, sample_density=10.0):  #, max_memory=2**30):
-  """ calculate electrostatic potential from electrons for pyscf scf object `mf` over grid specified by
-    3D `extents` and `sample_density`
-  """
+def pyscf_orbesp_grid(mf, grid):
+  """ calculate electrostatic potential from electrons for pyscf scf object `mf` over `grid` (Nx3) in Bohr """
   max_eval = 65536 #max_memory/mf.mol.nao_cart()/8  # nao_cart always >= nao_nr
   dm = mf.make_rdm1()
-  shape = grid_shape(extents, sample_density)
-  grid = r_grid(extents/ANGSTROM_PER_BOHR, shape=shape)
   esp_grid = np.empty(len(grid))
   for start in range(0, len(grid), max_eval):
-    fakemol = gto.fakemol_for_charges(grid[start:start+max_eval])
+    fakemol = gto.fakemol_for_charges(grid[start:start+max_eval]/ANGSTROM_PER_BOHR)  # needs grid pts in Bohr
     ints = df.incore.aux_e2(mf.mol, fakemol)
     esp_grid[start:start+max_eval] = np.einsum('ijp,ij->p', ints, dm)
 
-  return -2*esp_grid.reshape(shape)
+  return -esp_grid  # had -2 here before, but seems pyscf does account for both spins!?
+
+
+def pyscf_esp_grid(mf, grid):
+  """ calculate total electrostatic potential for pyscf scf object `mf` over `grid` (Nx3) in Bohr """
+  return pyscf_orbesp_grid(mf, grid) + esp_grid(mf.mol.atom_charges(), mf.mol.atom_coords(unit='Ang'), grid)
 
 
 # untested; mainly for using pyscf to calculate MOs on grid for visualization

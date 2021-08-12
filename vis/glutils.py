@@ -138,8 +138,8 @@ def compileShader(source, shaderType):
     # on compile error, print shader source with line numbers to aid debugging
     srclines = ''.join(source).splitlines()
     for ii,line in enumerate(srclines):
-      print "{}: {}".format(ii+1, line)
-    print "\nShader compile failure (code {}); line(column): {}".format(result, glGetShaderInfoLog(shader))
+      print("{}: {}".format(ii+1, line))
+    print("\nShader compile failure (code {}); line(column): {}".format(result, glGetShaderInfoLog(shader)))
     raise RuntimeError("Shader compile failure", shaderType)
   return shader
 
@@ -206,38 +206,56 @@ def perspective_proj(left, right, bottom, top, near, far):
        [0.0, 0.0, -1.0, 0.0]]
   return np.asarray(M)
 
+
 ## Geometry
 
-def cube_triangles():
-  # Use indexed drawing to reuse cube vertices; handy illustration adapted from vispy:
-  #           6-------7
-  #          /|      /|
-  #         4-------5 |
-  # z  y    | |     | |
-  # | /     | 2-----|-3
-  # |/      |/      |/
-  # +---x   0-------1
-  # Previously we were using array of 32 explicit vertices from speck
-
+# Use indexed drawing to reuse cube vertices; handy illustration adapted from vispy:
+#           6-------7
+#          /|      /|
+#         4-------5 |
+# z  y    | |     | |
+# | /     | 2-----|-3
+# |/      |/      |/
+# +---x   0-------1
+# Previously we were using array of 32 explicit vertices from speck
+def cube_triangles(flat=True):
+  """ vertices and indices for glDrawElements for cube for use with imposters, volume rendering, etc. """
   verts = np.array(
-      [[0, 0, 0],  # Corner 0.
+      [[0, 0, 0],  # corner 0
        [1, 0, 0],
        [0, 1, 0],
        [1, 1, 0],
        [0, 0, 1],
        [1, 0, 1],
        [0, 1, 1],
-       [1, 1, 1]], dtype=np.float32).flatten()  # Corner 7.
+       [1, 1, 1]], dtype=np.float32)  # corner 7
   indices = np.array(
-      [[0, 2, 1], [2, 3, 1],  # Triangle 0, triangle 1.
+      [[0, 2, 1], [2, 3, 1],  # triangle 0, triangle 1
        [1, 4, 0], [1, 5, 4],
        [3, 5, 1], [3, 7, 5],
        [2, 7, 3], [2, 6, 7],
        [0, 6, 2], [0, 4, 6],
-       [5, 6, 4], [5, 7, 6]], dtype=np.uint32).flatten()
+       [5, 6, 4], [5, 7, 6]], dtype=np.uint32)
   # another option - triangle strip with primitive restart (append 2^32-1)
   #self.indices = np.array([2, 6, 0, 4, 5, 6, 7, 2, 3, 0, 1, 5, 3, 7], dtype=np.uint32)
-  return verts, indices
+  return (verts.flatten(), indices.flatten()) if flat else (verts, indices)
+
+
+def cube_separate(flat=True):
+  """ vertices, normals, indices for cube, with separate vertices for each face for actually drawing cubes """
+  n0 = np.array(
+      [[ 0, 0,-1],  # 0123 face (see ASCII art above)
+       [ 0,-1, 0],  # 0145 face
+       [ 1, 0, 0],  # 1357 face
+       [ 0, 1, 0],  # 2367 face
+       [-1, 0, 0],  # 0246 face
+       [ 0, 0, 1]], dtype=np.float32)  # 4567 face
+  v0, i0 = cube_triangles(flat=False)
+  vertices = v0[i0.flatten()]
+  normals = n0.repeat(6, axis=0)
+  indices = np.arange(len(vertices), dtype=np.uint32)
+  return (vertices.flatten(), normals.flatten(), indices) if flat else (vertices, normals, indices)
+
 
 ## test fns
 

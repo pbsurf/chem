@@ -108,7 +108,7 @@ ELEMENTS_CSV = \
 
 class Element:
   def __init__(self, **kwargs):
-    for key,val in kwargs.iteritems():
+    for key,val in kwargs.items():
       setattr(self, key, val)
 
   def __repr__(self):
