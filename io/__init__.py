@@ -29,7 +29,7 @@ def load_molecule(file, postprocess=None, center=False, charges=False, residue=N
     mol_cc = cclib_open(file)
     # assume background charges follow atoms
     end_atoms = next((ii for ii,z in enumerate(mol_cc.atomnos) if z < 1), len(mol_cc.atomnos))
-    bonds = guess_bonds(mol_cc.atomcoords[0][:end_atoms], mol_cc.atomnos[:end_atoms], tol=0.2)
+    bonds = guess_bonds(mol_cc.atomcoords[0][:end_atoms], mol_cc.atomnos[:end_atoms])  #, tol=0.2)
     mol = Molecule(r=mol_cc.atomcoords[0], znuc=np.fmax(0, mol_cc.atomnos), bonds=bonds)
     mol.cclib = mol_cc
   mol.filename = filename
@@ -72,7 +72,7 @@ def write_or_append_hdf5(filename, mode, **kwargs):
       h5f.create_dataset(k, data=v)  #h5f[k] = v
 
 def write_hdf5(filename, **kwargs):
-  write_or_append_hdf5(filename, 'w', **kwargs)
+  write_or_append_hdf5(filename, 'x', **kwargs)  # fail if file exists
 
 def append_hdf5(filename, **kwargs):
   write_or_append_hdf5(filename, 'a', **kwargs)
@@ -80,5 +80,9 @@ def append_hdf5(filename, **kwargs):
 def read_hdf5(filename, *args):
   """ return tuple of specified fields from HDF5 file """
   import h5py
-  with h5py.File(filename, 'r') as h5f:
-    return tuple(getattr(h5f.get(key), 'value', None) for key in args) if len(args) > 1 else getattr(h5f.get(args[0]), 'value', None)
+  # we write str, h5py reads back bytes ... WTF!?
+  def str_fix(dset):
+    try: return dset.asstr()[...]
+    except: return dset[...]
+  with h5py.File(filename, 'r') as h5f:  # .value not longer available :-(
+    return tuple(str_fix(h5f.get(key)) for key in args) if len(args) > 1 else str_fix(h5f.get(args[0]))

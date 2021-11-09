@@ -51,7 +51,10 @@ def parse_xyz(xyz, inorganic=False):
       extname = name.split('_')
       is_hetatm = name.endswith('_')
       name, res_type, chain_id, res_id = ([s for s in extname if s] + [None]*4)[:4]
-      elem = name.title() if is_hetatm else name[0]  # convert to title case for lookup
+      # we'll require two character elements be written to pdbhack .xyz in title case
+      elem = name[:2] if len(name) > 1 and name[:2] in ELEMENTS else name[0]  #name.title() if is_hetatm
+      if len(elem) > 1:
+        name = elem.upper() + name[2:]  # use upper case internally
       if res_id != last_res_id or chain_id != last_chain_id:
         last_res_id, last_chain_id = res_id, chain_id
         mol.residues.append(Residue(name=res_type, pdb_num=res_id, chain=chain_id, het=is_hetatm))
@@ -165,6 +168,31 @@ def load_tinker_params(mol, filename=None, key=None, charges=True, vdw=False, bo
       if key is not None:
         os.remove(mmkey)
     except: pass
+
+
+def write_tinker_params(mol):
+  """ serialize MM params in Tinker format """
+  UNIT = 1.0/KCALMOL_PER_HARTREE
+  ids = lambda b: tuple(mol.atoms[a].mmtype for a in b)
+  s = []
+  for ii,a in enumerate(mol.atoms):
+    s.append('atom %d %d %s "GAFF atom" %d %.3f %d' %
+        (a.mmtype, a.mmtype, a.name, a.znuc, ELEMENTS[a.znuc].mass, len(a.mmconnect)))  # mm class = mm type
+  for p in mol.mm_stretch:
+    s.append("bond %d %d  %.2f %.4f" % (ids(p[0]) + (p[1]/UNIT, p[2])))
+  for p in mol.mm_bend:
+    s.append("angle %d %d %d  %.2f %.2f" % (ids(p[0]) + (p[1]/UNIT, p[2]*180/np.pi)))
+  for p in mol.mm_torsion:
+    s.append("torsion %d %d %d %d  " % ids(p[0])
+        + '  '.join("%.3f %.1f %d" % (q[0]/UNIT, q[1]*180/np.pi, q[2]) for q in p[1]))
+  for p in mol.mm_imptor:
+    s.append("imptors %d %d %d %d  " % ids(p[0])
+        + '  '.join("%.3f %.1f %d" % (q[0]/UNIT, q[1]*180/np.pi, q[2]) for q in p[1]))
+  for a in mol.atoms:
+    s.append("vdw %d  %.4f %.6f" % (a.mmtype, a.lj_r0/2, a.lj_eps/UNIT))
+  for a in mol.atoms:
+    s.append("charge %d  %.4f" % (a.mmtype, a.mmq))
+  return '\n'.join(s)
 
 
 # simple xyz reader to read just geometry from xyz file
@@ -307,8 +335,9 @@ def write_tinker_xyz(mol, filename=None, r=None, noconnect=None, title=None, pdb
     if not pdbhack or a.resnum is None:
       return a.name
     res = mol.residues[a.resnum]
-    #assert a.name.upper().startswith(ELEMENTS[a.znuc].symbol.upper()), "Atom name does not match element!"
-    return "{:_<4}_{}_{}_{}{}".format(ELEMENTS[a.znuc].symbol.upper() if res.het else a.name,  #a.name
+    # use title case for two character elements
+    name = a.name[:2].title() + a.name[2:] if len(ELEMENTS[a.znuc].symbol) > 1 else a.name
+    return "{:_<4}_{}_{}_{}{}".format(name,  #ELEMENTS[a.znuc].symbol.upper() if res.het else a.name
         res.name or 'XXX', res.chain or 'Z', res.pdb_num or (a.resnum + 1), "_" if res.het else "")
   # idea of noconnect is to omit bonds for (hetatm) qmatoms so we don't need extra Tinker params
   noconnect = frozenset(noconnect if noconnect else [])

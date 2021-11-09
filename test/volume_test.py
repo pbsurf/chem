@@ -18,7 +18,7 @@ vol1 = vol1.astype(np.float32)/np.max(vol1)
 s = np.shape(vol1)
 vol1_max = np.array(s)/float(np.max(s))
 vol1_extents = np.transpose([-vol1_max, vol1_max])
-print "Volume extents: {}".format(vol1_extents)
+print("Volume extents: {}".format(vol1_extents))
 
 
 camera = Camera()

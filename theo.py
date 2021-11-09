@@ -38,6 +38,34 @@ def place_residue(resname, align_atoms=None, align_ref=None, r_origin=None):
   return mol
 
 
+# hierarchical clustering
+# - seems to work well; any reason to consider alterative approaches?
+# - e.g., for each conformation, compare RMSD to accepted conformations and discard if close to one of them,
+#  otherwise add to accepted conformations
+# - density based clustering (DBSCAN, OPTICS) seems to be the current state-of-the-art; see scikit-learn.org
+def cluster_poses(Es, Rs, rslig, thresh=0.9):
+  """ cluster geometries `Rs` (w/ energies `Es`) based on RMSD of `rslig` atoms w/ threshold `thresh`,
+    choosing representative w/ lowest energy
+  """
+  from scipy.spatial.distance import squareform
+  from scipy.cluster.hierarchy import linkage, fcluster
+  # calc pairwise RMSD matrix
+  ligRs = Rs[:, rslig, :]
+  dRs = ligRs[:,None,:,:] - ligRs[None,:,:,:]
+  Ds = np.sqrt(np.einsum('iljk->il', dRs**2)/dRs.shape[-2])
+  # perform clustering; squareform converts between square distance matrix and condensed distance matrix
+  Z = linkage(squareform(Ds), method='single')
+  clust = fcluster(Z, thresh, criterion='distance')  # also possible to specify number of clusters instead
+  # pick lowest energy geometry as representative of each cluster
+  MCr, MCe = [], []
+  for ii in np.unique(clust):
+    sel = clust == ii
+    MCe.append(np.amin(Es[sel]))
+    MCr.append(Rs[sel][np.argmin(Es[sel])])
+  esort = np.argsort(MCe)
+  return np.asarray(MCe)[esort], np.asarray(MCr)[esort]
+
+
 ## fns for optimizing charges on grid
 
 def pyscf_bq_qgrad(mol, dm, coords):  #, charges):
@@ -270,6 +298,29 @@ def irc_integrate(EandG, r, dr, weight=1.0, step_size=0.1, ftol=1E-06, max_steps
 
 
 ## misc
+
+# this isn't really useful ... maybe try w/ very small cells and mark all cells within vdW radius of any atom
+# anyway, accepted value of protein density is ~1.35 g/cm^3
+# 2CHT.pdb (chorismate mutase): max ~0.09 heavy atoms/Ang^3
+# water at 1 g/mL: .056 mol/mL -> 0.056*NA/10^24 Ang^3 -> 3.37e22/1e24 -> 3.37e-2 -> 0.03 heavy atoms/Ang^3
+def density_counts(mol, a=5.0, numdens=False):
+  """ return histogram of density in g/mL, or number of heavy atoms per Ang^3 if numdens == True, for molecule
+    `mol`, using cubes of side `a` Ang
+  """
+  extents = mol.extents()
+  range = extents[1] - extents[0]
+  nbins = np.array(np.ceil(range/a), dtype=np.uint)
+  counts = np.zeros(nbins)
+  for atom in mol.atoms:
+    counts[ tuple(np.int_((atom.r - extents[0])/a)) ] += int(atom.znuc > 1) if numdens else ELEMENTS[atom.znuc].mass
+  return counts
+
+
+def density_hist(mol, a=5.0, numdens=False):
+  counts = density_counts(mol, a, numdens)
+  density = counts/(a*a*a) if numdens else counts/AVOGADRO/(a*1E-8)**3
+  return np.histogram(np.ravel(density), bins='auto')  #np.max(counts)+1)
+
 
 def path_ts(energies, coords):
   """ given reaction path energies and coords, return energy, coords, and tangent for highest energy state """

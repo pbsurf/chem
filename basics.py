@@ -1,6 +1,8 @@
-import math, collections, time
+import os, math, collections, time
 import numpy as np
 
+
+DATA_PATH = os.path.expandvars("$HOME/qc/data")
 
 ## general fns
 
@@ -27,6 +29,11 @@ def setitem(obj, idx, val):
   return obj
 
 
+def getitem(obj, idx, dflt=None):
+  try: return obj[idx]
+  except: return dflt
+
+
 def getvalues(d, *args):
   """ get multiple values from dict, e.g., x, y = getvalues(dictionary, 'x', 'y') """
   return tuple(d.get(k, None) for k in args)
@@ -44,7 +51,7 @@ def argsort(seq):
 
 def flattengen(t):
   for item in t:
-    if isinstance(item, collections.Iterable) and not isinstance(item, basestring):
+    if isinstance(item, collections.Iterable) and not isinstance(item, ''.__class__):
       for subitem in flattengen(item):
         yield subitem
     else:
@@ -104,14 +111,62 @@ def benchmark(fn):
   return res
 
 
-def read_file(filename):
-  with open(filename, 'r') as f:
+def read_file(filename, mode='r'):
+  with open(filename, mode) as f:
     return f.read()
 
 
-def write_file(filename, contents):
-  with open(filename, 'w') as f:
+def write_file(filename, contents, mode='x'):
+  with open(filename, mode if type(contents) is str else mode+'b') as f:
     f.write(contents)
+
+
+# storing anything but numeric numpy arrays in hdf5 is a mess
+def write_pickle(filename, **kwargs):
+  import pickle
+  write_file(filename, pickle.dumps(kwargs))
+
+
+def read_pickle(filename, *args):
+  import pickle
+  return getvalues(pickle.loads(read_file(filename, 'rb')), *args)
+
+
+def _write_zip(filename, kwargs, mode):
+  from zipfile import ZipFile, ZIP_DEFLATED
+  with ZipFile(filename, mode, ZIP_DEFLATED) as zf:
+    for k,v in kwargs.items():
+      zf.writestr(k, v)
+
+def write_zip(filename, **kwargs):
+  _write_zip(filename, kwargs, mode='x')
+
+def append_zip(filename, **kwargs):
+  _write_zip(filename, kwargs, mode='a')
+
+
+def read_zip(filename, *args):
+  from zipfile import ZipFile
+  with ZipFile(filename, 'r') as zf:
+    return zf.read(args[0]) if len(args) == 1 else tuple(zf.read(a) for a in args)
+
+
+# object returned by np.load("*.npz") must be closed, so we need this fn to do one-liners
+def load_npz(filename, *args):
+  with np.load(filename) as npz:
+    return npz[args[0]] if len(args) == 1 else tuple(npz[a] for a in args)
+
+
+# not sure if we'll actually use this
+# use: write_zip('mutate3.zip', dE=npy_bytes(dE));  dE = npy_bytes(read_zip('mutate3.zip', 'dE'))
+def npy_bytes(x):
+  """ convert between numpy array and npy serialized data in bytes object """
+  from io import BytesIO
+  if type(x) is bytes:
+    return np.load(BytesIO(x))
+  f = BytesIO()
+  np.save(f, x)
+  return f.getvalue()
 
 
 ## plotting
@@ -124,18 +179,19 @@ def plot(*args, **kwargs):
     subplots=(rows, cols) and subplot=index (ordered left to right, top to bottom, from 0)
   """
   import matplotlib.pyplot as plt
-  subplot = kwargs.get('subplot', None)
-  subplots = kwargs.get('subplots', None)
+  subplot = kwargs.pop('subplot', None)
+  subplots = kwargs.pop('subplots', None)
   if not subplot:  # None or 0 (first subplot)
     plt.ion()  # interactive mode - make plot window non-blocking
     plt.figure()
   if subplots is not None:
     plt.subplot(subplots[0], subplots[1], subplot+1)
-  plt.plot(*args, picker=kwargs.get('picker', None))
-  if 'xlabel' in kwargs: plt.xlabel(kwargs['xlabel'])
-  if 'ylabel' in kwargs: plt.ylabel(kwargs['ylabel'])
-  if 'title' in kwargs: plt.title(kwargs['title'])
-  if 'legend' in kwargs: plt.legend(kwargs['legend'])
+  if 'xlabel' in kwargs: plt.xlabel(kwargs.pop('xlabel'))
+  if 'ylabel' in kwargs: plt.ylabel(kwargs.pop('ylabel'))
+  if 'title' in kwargs: plt.title(kwargs.pop('title'))
+  if 'legend' in kwargs: plt.legend(kwargs.pop('legend'))
+  plotfn = getattr(plt, kwargs.pop('fn', 'plot'))
+  plotfn(*args, **kwargs)  #picker=kwargs.get('picker', None))
   if not subplot:
     plt.show()
   return plt.gcf()
@@ -298,16 +354,16 @@ def calc_dist(v1, v2=None, grad=False):
 
 
 def calc_angle(v1, v2=None, v3=None, grad=False):
-  """ v1,v2,v3: numpy 3-vectors; returns interior angle (a) specified by input vectors and if grad=True,
-    gradient as: [[da/dx1, da/dy1, da/dz1], [da/dx2, da/dy2, da/dz2], [da/dx3, da/dy3, da/dz3]]
+  """ v1,v2,v3: numpy 3-vectors; returns interior angle in radians (a) specified by input vectors and, if
+    grad=True, gradient as: [[da/dx1, da/dy1, da/dz1], [da/dx2, da/dy2, da/dz2], [da/dx3, da/dy3, da/dz3]]
   """
   v1, v2, v3 = (v1,v2,v3) if v3 is not None else v1
   v12 = v1 - v2
   v23 = v2 - v3
   # result is in radians (pi - converts to interior bond angle)
-  deg = np.pi - np.arccos(np.dot(v12, v23)/norm(v12)/norm(v23))
+  ang = np.pi - np.arccos(np.dot(v12, v23)/norm(v12)/norm(v23))
   if not grad:
-    return deg
+    return ang
   # from Mathematica
   d12sq = np.dot(v12, v12)
   d23sq = np.dot(v23, v23)
@@ -316,20 +372,20 @@ def calc_angle(v1, v2=None, v3=None, grad=False):
   # for small angle, numerator ~ angle^2, denominator ~ angle so grad -> 0
   ## TODO: write tests for this code and then cleanup the math to use unit vectors 12 and 23
   if denom/norm(v12)/norm(v23) < 1E-20:
-    return deg, [0.0, 0.0, 0.0]
+    return ang, [0.0, 0.0, 0.0]
   da1 = (v23 - v12*dot1223/d12sq)/denom
   da3 = (-v12 + v23*dot1223/d23sq)/denom
   # translation of one atom (e.g. middle atom) by delta is equiv to translation of other two atoms by -delta
   da2 = -da1 - da3
-  return deg, np.array([da1, da2, da3])
+  return ang, np.array([da1, da2, da3])
 
 
 # TODO: need to handle v123 or v234 null, although not sure we'll encounter this in practice
 # Note: all the signs in the gradient calculation were determined by trial and error, not careful algebra
 # - can be checked with EandG_sanity(lambda x: calc_dihedral(x, grad=True), np.random.rand(4,3))
 def calc_dihedral(v1, v2=None, v3=None, v4=None, grad=False):
-  """ return dihedral angle - angle between planes defined by points 1,2,3 and 2,3,4 - and optionally gradient
-    refs: Wilson, Mol. Vibrations (1955), ch. 4; JCC 17, 1132 (via Wikipedia)
+  """ return dihedral angle in radians - angle between planes defined by points 1,2,3 and 2,3,4 - and
+    optionally gradient; refs: Wilson, Mol. Vibrations (1955), ch. 4; JCC 17, 1132 (via Wikipedia)
   """
   v1, v2, v3, v4 = (v1,v2,v3,v4) if v4 is not None else v1
   # vab = va - vb is vector from b to a

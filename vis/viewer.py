@@ -5,18 +5,25 @@ import numpy as np
 import OpenGL
 OpenGL.ERROR_CHECKING = False  # if our error check at end of frame fires, disable this to track down error
 #OpenGL.FULL_LOGGING = True  # set log level to DEBUG in chemvis.py to trace GL calls
+#OpenGL.ERROR_ON_COPY = True  -- requires we manage lifetime of everything passed to GL
+#OpenGL.STORE_POINTERS = False
 from OpenGL.GL import *
 from ..external.glfw import *
 from ..external.glfw import _glfw  # symbols starting with underscore not imported by *
 from .glutils import *
 
+# dict_keys() printed on exit after using chemvis come from PyOpenGL arrays/arraydatatype.py:55, called from
+#  doBufferDeletion() at arrays/vbo.py:107 set by arrays/vbo.py:286 (for some reason this doesn't happen when
+#  threading=False); soln for now is to use user_finish callback to clear children in chemvis for GC
 
 class GLFWViewer:
 
-  def __init__(self, camera, bg_color=(255,255,255,255), key_callback=None):
+  def __init__(self, camera, bg_color=(255,255,255,255)):
+    """ callbacks to be set by caller after creating GLFWViewer object: user_on_key, user_on_click,
+      user_on_drag, user_draw
+    """
     self.camera = camera
     self.bg_color = bg_color
-    self.user_on_key = key_callback
     self.animate_event = False
     self.fbo = None
     self.window = None
@@ -84,17 +91,18 @@ class GLFWViewer:
         self.should_repaint = True
     glfwHideWindow(window)
     #glDeleteTextures(list(self.fb_textures.values()))
-    #glfwDestroyWindow(window)
-    #self.window = None
+    self.terminate()
     print("GLFWViewer event loop stopped")
 
 
-  # How to call this when exiting?  Do we need to?
   def terminate(self):
     if self.window is not None:
       # GLFW docs warn against destroying window when context is current on another thread
-      glfwMakeContextCurrent(self.window)
-      glfwTerminate()
+      #glfwMakeContextCurrent(self.window)
+      #glfwTerminate() -- only if used for final exit, not per window as currently!
+      #from OpenGL import contextdata;  contextdata.cleanupContext()  #contextdata.getContext()
+      self.user_finish()
+      glfwDestroyWindow(self.window)
       self.window = None
 
 
@@ -340,7 +348,8 @@ class GLFWViewer:
       dh, dv = delta if char in 'AD' else 0, delta if char in 'WS' else 0
       if mods & GLFW_MOD_CONTROL:
         if char in 'WS':
-          self.camera.mouse_zoom(0.2*delta)
+          self.camera.min_z_near = max(0.01, self.camera.min_z_near + delta)  #self.camera.mouse_zoom(0.2*delta)
+          print("Near clipping plane: %f" % self.camera.min_z_near)
         else:
           self.camera.fov *= pow(1.1, delta)
           print("Camera FOV: %f degrees" % self.camera.fov)

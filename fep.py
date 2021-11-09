@@ -19,6 +19,7 @@ def resp_prepare(mol, constr=[], avg=[]):
   """ run HF/6-31G* ESP charge fitting with restraints toward q = 0 on znuc > 1 atoms, with sets of atoms
     `constr` constrained to have same charge and charges of sets of atoms `avg` made equal by averaging after fit
   """
+  from .molecule import init_qmatoms
   from .opt.optimize import moloptim
   from .qmmm.qmmm1 import QMMM, pyscf_EandG
   from .qmmm.resp import resp
@@ -42,15 +43,19 @@ def gaff_prepare(mol, constr=[], avg=[], mmtype0=801):
   """
   from .mm import load_amber_dat, set_mm_params
   # amber parm files can be obtained from, e.g., github.com/choderalab/ambermini
-  gaff = load_amber_dat(os.path.expandvars('$HOME/qc/2016/common/') + 'amber/gaff.dat')
-  set_mm_params(mol, gaff, mmtype0=mmtype0)
+  gaff = load_amber_dat(DATA_PATH + '/amber/gaff.dat')
+  mol.mmtype = [a.name.upper() for a in mol.atoms]
+  set_mm_params(mol, gaff)
+  mol.mmtype = np.arange(mol.natoms) + mmtype0
   return resp_prepare(mol, constr, avg)
 
 
-def solvate_prepare(mol, key, T0, solute_res=None, eqsteps=5000, cleanup=True):
-  from chem.qmmm.prepare import water_box, solvate
+def solvate_prepare(mol, ff, T0, pad=6.0, solute_res=None, solvent_chain=None, neutral=False, eqsteps=5000):
+  from .molecule import Molecule, Atom
+  from .model.prepare import water_box, solvate
+  from .io.openmm import openmm, openmm_MD_context, UNIT
   # make a cubic water box
-  side = np.max(np.diff(mol.extents(pad=6.0), axis=0))
+  side = np.max(np.diff(mol.extents(pad=pad), axis=0))
   solvent = water_box(side)
   # check radial distribution fn (min dist should be ~1.5 if overfill worked properly
   if 0:
@@ -58,31 +63,27 @@ def solvate_prepare(mol, key, T0, solute_res=None, eqsteps=5000, cleanup=True):
     bins,rdf = calcRDF(solvent.r[solvent.znuc > 6], solvent.pbcbox)
     plot(bins[:-1], rdf)
 
+  na_plus, cl_minus = None, None
+  if neutral:
+    # Amber names for Na, Cl
+    na_plus = Molecule(atoms=[Atom(name='Na+', znuc=11, r=[0,0,0], mmq=1.0)]).set_residue('Na+')
+    cl_minus = Molecule(atoms=[Atom(name='Cl-', znuc=17, r=[0,0,0], mmq=-1.0)]).set_residue('Cl-')
+    openmm_load_params(mol, ff=ff, charges=True)  # needed
   # any point in doing equilibriation before solute is added?
   mol.r = mol.r - np.mean(mol.extents(), axis=0)
-  solvated = solvate(mol, solvent, d=2.0, solute_res=solute_res)
-  # check box visually
-  #if 0:
-  #  from chem.vis.chemvis import *
-  #  vertices, normals, indices = cube_separate(flat=False)  # returns unit cube: (0..1,0..1,0..1)
-  #  vertices = np.dot(vertices, np.diag(solvent.pbcbox)) - 0.5*solvent.pbcbox
-  #  # for a general transformation, we'd need to apply to normals then renormalize
-  #  cubemol = Bunch(r=vertices, normals=normals, colors=[(255, 0, 0, 127)], indices=indices)
-  #  vis = Chemvis([ Mol(solvated, [ VisGeom(style='licorice') ]), Mol(cubemol, [VisTriangles()]) ]).run()
+  solvated = solvate(mol, solvent, d=2.0,
+      solute_res=solute_res, solvent_chain=solvent_chain, ion_p=na_plus, ion_n=cl_minus)
 
-  # short equilibriation
-  prefix = "solv_%d" % time.time()
-  write_tinker_xyz(solvated, prefix + ".xyz")
-  write_file(prefix + ".key", key)
-  # minimization
-  subprocess.check_call([os.path.join(TINKER_PATH, "minimize"), prefix + ".xyz", "1.0"])
-  #solvated.r = read_tinker_geom(prefix + '.xyz_2')
-  # equilibriation
-  subprocess.check_call([os.path.join(TINKER_PATH, "dynamic"), prefix + ".xyz_2",
-      str(eqsteps), "2.0", "1", "4", str(T0), "1.0"])  # 2 fs step, 1ps/save, NPT, T (K), p (atm)
-  solvated.r, solvated.pbcbox = read_tinker_geom(prefix + ".arc", pbc=True, last=True)
-  if cleanup:
-    os.system("rm " + prefix + ".*")
+  # short equilibriation (now using OpenMM instead of Tinker)
+  solvated.r = solvated.r + 0.5*side  # OpenMM centers box at side/2 instead of origin
+  if eqsteps:
+    ctx = openmm_MD_context(solvated, ff, T0)
+    openmm.LocalEnergyMinimizer.minimize(ctx, maxIterations=100)
+    ctx.getIntegrator().step(eqsteps)
+    simstate = ctx.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)
+    solvated.r = simstate.getPositions(asNumpy=True).value_in_unit(UNIT.angstrom)
+    solvated.pbcbox = np.diag(simstate.getPeriodicBoxVectors(asNumpy=True).value_in_unit(UNIT.angstrom))
+    solvate.md_vel = simstate.getVelocities(asNumpy=True).value_in_unit(UNIT.angstrom/UNIT.picosecond)
   return solvated
 
 

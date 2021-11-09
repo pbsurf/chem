@@ -3,8 +3,9 @@ import sys, os, time, glob, threading, logging
 #logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)  #logging.DEBUG
 
 from ..data.elements import ELEMENTS
-from ..io import load_molecule
 from ..molecule import *
+from ..io import load_molecule
+from ..model.build import add_hydrogens
 from .viewer import GLFWViewer
 from ..external.glfw import GLFW_KEY_BACKSPACE, GLFW_KEY_F1, GLFW_KEY_HOME
 from .camera import Camera
@@ -16,170 +17,24 @@ from .backbone import VisBackbone, VisTriangles
 from .nonbonded import *
 from .postprocess import GammaCorrEffect, AOEffect, OutlineEffect, DOFEffect, FogEffect, PostprocessHost
 
-
-## Goals
-# - render molecules with controllable transparency and greyscale (to show current and previous geom)
-# - provide some basic selection functions so we can render backbone, substrates, QM regions, etc. differently
-# - play movie of geom opt steps
-# - render MO or combined MOs (e.g. total electron density) as volume or isosurfaces
-# Notes:
-# * color format is (R,G,B,A); 0-255; conversion to OpenGL format (0.0-1.0) done when necessary
-# * objects from external libraries such as cclib and pyscf will be stored in attributes of Molecule object
-
-
-## TODO:
-# 1. need a better alternative to RenderConfig.shading global
-# 1. use mouse wheel to control fog?
-
-# - would be nice to have live updating of Chemvis view when molecule changes ... even for each step of
-#  optimization ... for opt, we could just wrap EandG fn with something to pass new r to Chemvis
-# - similarly, would be nice to view multiple geometries of molecule w/o creating separate Molecule for each!
-# - created option for Mol class (or separate class) to take list of r arrays + single molecule; doesn't work
-#  correctly with selection stuff currently ... we'll see if it's worth keeping
-# ... we could store r in selection hit object and in select(), we can do old_r, mol.r = mol.r, r ... mol.r = old_r
-
-# How to handle selection with list of molecules?
-#  - option to run selection fn for each molecule?
-#  - store selection per-molecule?  In Molecule or make Chemvis.selection a dict?
-
-# 1. supersampling
-# 1. molecular surfaces? ... could try hyperball shader from ngl?  depth peeled sphere rendering?
-
-# playing with 1Y0L: color each chain with gradient of different color?  easy way to only draw atoms within some radius of selection or other point?
-
-
-## Cleanup tasks
-# - shadows: orthographic projection for cylinder imposters
-# - rename Chemvis.children to .mols, and maybe Mol.children to .renderers
-# - should shaders be class variables instead of instance variables? - we'll have to get rid of self.modules stuff!
-# - maybe cycling through views should be user defined, i.e., we pass a list of Vis* objects in place of a single one
-# - we should probably pass colors to a fn to generate color_by_ rather combining in Vis* constructors!
-# - poisson disk as uniform array; move to glutils.py
-
-## Later
-# - VisBackbone.set_ribbon_data() is slow (200 ms per load for trypsin) - try line_profiler; see if we can get same quality with larger max_cosine_axis/_orient; would fixed step size allow us to vectorize?
-# - support more efficient updating when just changing r but not molecule?
-# - text rendering ... stb_truetype can now generate SDF directly!
-#  - add easy way to show and persist a distance or angle measurement
-# - animation for set_view()
-# - freezing a molecule from list: wrap renderer list with lambda so duplicate set can be created?
-# - transparency: opacity param for Mol() and global alpha in shading.py?  See notes in mol_renderer.py
-# - option to draw wireframe for (non-imposter) geometry? (barycentric approach)
-# - method of Mol or Chemvis to add or replace a renderer and/or single fn to change attributes and refresh
-# - decide upon and apply a uniform naming convention for GLSL variables!
-# - switch from GLFW to SDL2 to support touch input (sadly not quite working on linux with vmware) - https://github.com/marcusva/py-sdl2
-# - any better way to handle drawing selection spheres to improve visibility with volumes?
-# - option for gradient background
-# - try shading LineRenderer like StickRenderer
-# - controllable clipping plane for slicing to see inside geometry?
-# - progressive enhancement for volume rendering?  maybe try adaptive step size (for fog) first!
-# - idea: save and restore views (positions 0-9 vs. undo stack?)
-# - capped cylinder renderer (for e.g. disulfides in backbone)
-# - fancier shading: geometry has "material" with lighting properties, instead of just a color
-# - try bump mapping with noise in shading module
-# - how might we visualize results of seq+structure alignment ... color residues green, yellow, or red?
-# - better visualization of proline with extbackbone + sidechain?
-# - camera: rewrite; eliminate c vector and compute from pivot and position?
-# - attach notes/annotations to parts of molecule (we could save as PDB REMARKs) (credit to jolecule.com); can
-#  also serve as links to saved views of molecule
-# - any reason to try GL_DEPTH_COMPONENT32F and/or inverted depth buffer?
-
-# Logic for input too varied to do something like
-#viewer.register_var("Volume absorptivity: %0.3f", self.vol_obj, 'absorption', keys, scale=1.25, reset=10.0)
-# so instead maybe try this:
-#keys = dict(mo_number=";'", ray_steps='Ctrl+-=', isolevel='-=|Bksp', absorption='[]|\\', method='V')
-#def on_input(self, viewer, var, step):  # step = +/- 1 or 10, or 'reset'
-
-
-## Examples
-# Chemvis accepts a list of molecule objects, which optionally can be loaded on demand from a glob using a
-#  Files object.  Visualization objects (Vis*) can cache computed values in the molecule objects
-if 0:
-  Chemvis(Mol(Files('*-tinker.pdb'), [
-    VisGeom(style='spacefill', coloring=coloring_opacity(color_by_element, 0.5)) ]) ).run()
-
-  Chemvis(Mol(Files('*-tinker.pdb'), [
-    VisGeom(style='licorice', sel='backbone'), VisGeom(style='lines', sel='sidechain'),
-    # select residues having any atom within 10 Ang of atom 3250
-    VisGeom(style='spacefill', sel='any(mol.dist(a, 3250) < 10 for a in resatoms)') ]) ).run()
-
-  Chemvis(Mol(Files('../QMMM_1/pureQM_qm*.log'), [
-    VisGeom(style='licorice'),
-    VisVol(cclib_mo_vol, vis_type='iso', vol_type="MO Volume"),
-    VisVol(cclib_lmo_vol, vis_type='iso', vol_type="LMO Volume") ]) ).run()
-
-  # laplacian of electron density - "atoms in molecules"
-  Chemvis(Mol(Files('../QMMM_1/pureQM_qm010.log'), [
-    VisGeom(style='licorice'),
-    VisVol(cclib_dens_vol, vis_type='volume', vol_type="Electron Density", postprocess=laplacian, iso_step=0.001)
-  ]), bg_color=Color.white).run()
-
-  # show only valence electron density ... I'm not sure this is useful or interesting
-  # absorption style + heat_colormap works well with black BG, unlike blending + red/blue
-  Chemvis(Mol(Files('../QMMM_1/pureQM_qm010.log'), [
-    VisGeom(style='licorice'),
-    VisVol(partial(cclib_dens_vol, mos='valence'), vis_type='absorption', colormap=heat_colormap(256), vol_type="Density Volume", timing=True)
-  ]), bg_color=Color.black).run()
-
-  # two QM/MM
-  Chemvis([
-    Mol(Files('ethanol/*qm.log'), [ VisVol(cclib_mo_vol, vol_type="MO Volume", vis_type='iso') ]),
-    Mol(Files('ethanol/*mm.xyz'), [ VisGeom(style='licorice') ]),
-    Mol(Files('ethanol/*qm2.log'), [ VisVol(cclib_mo_vol, vol_type="MO Volume", vis_type='iso') ]),
-    Mol(Files('ethanol/*mm2.xyz'), [ VisGeom(style='licorice') ])
-  ]).run()
-
-  # Files(['1CE5.xyz', '1CE5-min.xyz'], charges='generate')
-  vis = Chemvis([
-    Mol([load_molecule('1CE5.xyz', charges='generate')], [
-      VisGeom(style='lines'),
-      VisContacts(style='lines', dash_len=0.1, colors=Color.light_grey) ]),
-    Mol([load_molecule('1CE5-tinker.pdb')], [
-      VisBackbone(style='tube', atoms=['CA'], coloring=color_by_residue, color_interp='step') ]) ],
-    bg_color=Color.black).run()
-
-  # cartoon shading/"molecule-of-the-month" - e.g. https://pdb101.rcsb.org/motm/213 (typically no hydrogens)
-  Chemvis(Mol(Files('1CE5.pdb'), [
-    VisGeom(style='spacefill', sel='protein', coloring=coloring_mix(color_by_element, Color.cyan, 0.85)) ]),
-    shading=LightingShaderModule(shading='none', outline_strength=8.0), bg_color=Color.white).run()
-
-  # ambient occlusion
-  Chemvis(Mol(Files('1CE5.pdb', hydrogens='1CE5-tinker.pdb'), [ VisGeom(style='spacefill') ]),
-    effects=[AOEffect(nsamples=70)], shadows=True).run()
-
-  # Cutinase - esterase w/ classic SER, HIS, ASP catalytic triad
-  vis = Chemvis(Mol(Files('1CEX.pdb', hydrogens='1CEX.xyz'), [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, colors=None, color_interp='ramp'), VisGeom(style='lines', sel='extbackbone'), VisGeom(style='lines', sel='sidechain') ]), fog=True).run()
-  vis.select("/A/120,175,188/~C,N,CA,O,H,HA")  # catalytic triad sidechains
-
-  # align each molecule to a reference
-def test_trypsin_1():
-  ref_mol = load_molecule('1CE5.pdb', hydrogens=lambda s: s[:-4] + '-tinker.pdb')
-  align_fn = lambda mol: align_mol(mol, ref_mol, sel='pdb_resnum in [57, 102, 189, 195] and sidechain and atom.znuc > 1', sort='pdb_resnum, atom.name')
-  return Chemvis(Mol(Files('????.pdb', hydrogens=lambda s: s[:-4] + '-tinker.pdb', postprocess=align_fn), [ VisBackbone(style='tubemesh', coloring=color_by_resnum, color_interp='ramp'), VisGeom(style='lines', sel='extbackbone'), VisGeom(style='lines', sel='sidechain'), VisGeom(style='lines', sel='pdb_resnum in [57, 102, 189, 195]')]), bg_color=Color.black).run()
-
-def test_pyscf_1(mol=None):
-  # pyscf MOs
-  from pyscf import gto, scf
-  import chem.data.test_molecules as test_molecules
-
-  mol = test_molecules.ethanol_old_oplsaa_xyz if mol is None else mol
-  mol = load_molecule(mol) if type(mol) is str else mol
-  mol_gto = gto.M(atom=[ [ELEMENTS[a.znuc].symbol, a.r] for a in mol.atoms ], basis='6-311g**', cart=True) #ccpvdz')
-  mol.pyscf_mf = scf.RHF(mol_gto).run()
-  return Chemvis(Mol([mol], [ VisGeom(style='licorice'), VisVol(pyscf_dens_vol, vis_type='volume', vol_type="Electron density", timing=True) ]), bg_color=Color.white).run()
-
-
 ## Chemvis - top level class
+# Notes and example moved to ../test/vis_test.py
 
 class Chemvis:
 
   def __init__(self, children, effects=[], shading='phong', shadows=False, fog=False, bg_color=Color.black,
-      wrap=True, timing=False, threaded=True, step_singles=False, drag_atoms=False, verbose=False):
+      wrap=False, timing=False, threaded=True, step_singles=False, drag_atoms=False, lock_orientation=False,
+      refresh_sel=False, verbose=False):
     """ create Chemvis instance, with list of Mol objects in `children`
-      Options: `wrap`: wrap to beginning of file lists when stepping, `bg_color`: window background color,
-      `timing`: print frame render times, `threaded`: run viewer on separate thread so python prompt is
-      available - might need to disable for pdb debugging, `step_singles`: include `Mol`s with single file
-      (or r) for stepping (so stepping will be prevented unless hidden or unfocused)
+      Options:
+      - `wrap`: wrap to beginning of file lists when stepping
+      - `bg_color`: window background color,
+      - `timing`: print frame render times
+      - `threaded`: run viewer on separate thread so python prompt is available (disable for pdb debugging)
+      - `step_singles`: include `Mol`s with single file (or r) for stepping (so stepping will be prevented
+        unless they are hidden or unfocused)
+      - `lock_orientation`: keep "north-south" axis vertical when orbiting camera
+      - `refresh_sel`: update selection to follow atom positions
     """
     self.children = children if type(children) is list else [children]
     self.wrap = wrap
@@ -187,6 +42,7 @@ class Chemvis:
     self.threaded = threaded
     self.step_singles = step_singles
     self.drag_atoms = drag_atoms
+    self.refresh_sel = refresh_sel
     self.verbose = verbose
     self.animation_period = 500 # ms
     self.animating = False
@@ -194,13 +50,14 @@ class Chemvis:
     self.mol_number = 0
     bg_color = decode_color(bg_color)
     # camera and viewer
-    self.camera = Camera()
+    self.camera = Camera(lock_orientation=lock_orientation)
     self.initial_view = None
     self.viewer = GLFWViewer(self.camera, bg_color=bg_color)
     self.viewer.user_on_key = self.on_key_press
     self.viewer.user_on_click = self.on_click
     self.viewer.user_on_drag = self.on_drag
     self.viewer.user_draw = self.draw
+    self.viewer.user_finish = self.on_finish
 
     # lighting config shared by geometry renderers
     if type(shading) is str:
@@ -258,7 +115,7 @@ IO: slower/faster animation
     if refresh:
       for hit in self.selection:
         hit.r = hit.vismol.curr_r[hit.idx] if hit.vismol else hit.r
-    if sel:
+    if sel or pdb:
       child = self.children[mol] if type(mol) is int else None
       mol = child.mol if child else mol
       r_array = child.curr_r if child else mol.r
@@ -287,12 +144,18 @@ IO: slower/faster animation
     return self  # for chaining
 
 
-  def set_view(self, r=None, dist_to_r=None, r_up=None, make_default=False):
-    """ rotate view to center `r` (by default the centroid of the current selection), optionally at
-      `dist_to_r` from camera and with orientation defined by `r_up`
+  def set_view(self, r=None, dist=None, r_up=None, center=False, make_default=False):
+    """ rotate view to center `r` (or centroid of the current selection if None), optionally at `dist` from
+      camera and with orientation defined by `r_up`; `r` is made camera pivot if `center` is True
     """
-    r = np.mean([h.r for h in self.selection], axis=0) if r is None else r
-    self.camera.rotate_to(r, dist_to_r, r_up)
+    if r is None and self.selection:
+      r = np.mean([h.r for h in self.selection], axis=0)
+    if r is not None:
+      self.camera.rotate_to(r, dist, r_up)
+    if center:
+      dr = r - self.camera.pivot
+      self.camera.pivot += dr
+      self.camera.position += dr
     if make_default:
       self.initial_view = self.camera.state()
     self.viewer.repaint(wake=True)
@@ -306,18 +169,18 @@ IO: slower/faster animation
 
   # for efficiency, we do not load molecule for invisible mols or renderers until a mol or renderer is toggled
   #  to visible, at which point molecule is loaded for everything, visible and invisible
-  def refresh(self, load_invisible=False, repaint=False):
+  def refresh(self, r=None, load_invisible=False, repaint=False, refresh_sel=False):
     """ (re)load molecule selected by self.mol_number for visible and focused children """
     for ii, child in enumerate(self.children):
       if child.focused and (child.visible or load_invisible):
-        molname = getattr(child.mol, 'filename', ("Mol %d" % ii))
-        if self.print_timing:
-          print("Load times for %s:" % molname)
         mol_number = self.mol_number if child.n_mols() > 1 else 0
-        child.load_mol(mol_number, print_timing=self.print_timing, load_invisible=load_invisible)
-        if self.verbose:  #not self.animating:
+        child.load_mol(mol_number, print_timing=self.print_timing, load_invisible=load_invisible, r=r)
+        if self.verbose or self.print_timing:  #not self.animating:
+          molname = getattr(child.mol, 'caption', getattr(child.mol, 'filename', ("Mol %d" % ii)))
           print("Loaded %s (%d)" % (molname, mol_number))
     self.invisible_loaded = load_invisible
+    if refresh_sel:
+      self.select(clear=False, refresh=True, print_dim=self.verbose)
     if repaint:
       self.viewer.repaint(wake=True)
 
@@ -363,6 +226,12 @@ IO: slower/faster animation
   def exit(self):
     self.viewer.run_loop = False
     self.viewer.repaint(wake=True)
+
+
+  def on_finish(self):
+    """ clear references to allow for GC (to prevent undesired printing when exiting python) """
+    self.children = None
+    self.viewer = None
 
 
   def draw(self, viewer):
@@ -413,7 +282,7 @@ IO: slower/faster animation
     hits = []
     for child in self.children:
       if child.visible and child.focused:
-        for vis in child.children:
+        for vis in child.renderers:
           if isinstance(vis, VisGeom) and getattr(vis, 'visible', True) and getattr(vis, 'focused', True):
             r_array = child.curr_r[vis.active] if vis.active is not None else child.curr_r
             selr = 1.0 if vis.style == 'spacefill' else 0.2  # H vdW radius is 1.1
@@ -497,7 +366,7 @@ IO: slower/faster animation
           new_mol_number = (self.n_mols - 1) if key == '.' else 0
       if self.wrap or not (new_mol_number < 0 or new_mol_number >= self.n_mols):
         self.mol_number = new_mol_number % self.n_mols
-        self.refresh()
+        self.refresh(refresh_sel=self.refresh_sel)
       elif self.verbose:  #not self.animating:
         print("Reached %s of file list" % ("beginning" if self.mol_number == 0 else "end"))
     elif key == 'P':
@@ -513,8 +382,10 @@ IO: slower/faster animation
         self.animation_period *= np.power((1.25 if key == 'I' else 0.8), (10 if 'Shift' in mods else 1))
         viewer.animate(self.animation_period)
     elif key == 'R' and 'Ctrl' in mods:  # and/or keycode==F5?
-      # refresh selection
-      self.select(clear=False, refresh=True, print_dim=True)
+      if 'Shift' in mods:
+        self.refresh_sel = not self.refresh_sel
+      else:
+        self.select(clear=False, refresh=True, print_dim=True)  # refresh selection
     elif key == 'U':
       self.wrap = not self.wrap  # 'W' is taken by viewer
     elif key == '`':
@@ -522,7 +393,7 @@ IO: slower/faster animation
       for jj, child in enumerate(self.children):
         mol_name = getattr(child.mol, 'filename', ("Mol %d" % jj))
         print("%s (Ctrl+%d) focused=%s visible=%s:" % (mol_name, jj, child.focused, child.visible))
-        for vis in child.children:
+        for vis in child.renderers:
           print("  %d: %s focused=%s visible=%s" % (ii, vis,
               getattr(vis, 'focused', True), getattr(vis, 'visible', True)))
           ii += 1
@@ -548,7 +419,7 @@ IO: slower/faster animation
           self.on_key_press(viewer, keycode, ',', ['Shift'])
           return
       else:
-        vs = [vis for child in self.children for vis in child.children]
+        vs = [vis for child in self.children for vis in child.renderers]
         if idx >= len(vs):
           return
         # renderers don't have focused and visible attributes by default
@@ -595,22 +466,25 @@ IO: slower/faster animation
 ## Mol objects
 
 class Mol:
-  def __init__(self, mols, r=None, children=None, focused=True, visible=True):
-    """ Note that if r is passed, mols.r is not included automatically """
-    self.r = ([r] if np.ndim(r) == 2 else r) if children is not None and r is not None else None
-    children = r if children is None else children
+  def __init__(self, mols, r=None, renderers=None, focused=True, visible=True, update_mol=False):
+    """ Note that if r is passed, mols.r is not included automatically; if `update_mol` is true, current r
+      will be assigned to mol.r
+    """
+    self.r = ([r] if np.ndim(r) == 2 else r) if renderers is not None and r is not None else None
+    renderers = r if renderers is None else renderers
     self.mols = [mols] if hasattr(mols, 'r') else mols  # support anything with a .r attribute; len(dict) >= 0
-    self.children = children if type(children) is list else [children]
+    self.renderers = renderers if type(renderers) is list else [renderers]
     self.focused = focused
     self.visible = visible
+    self.update_mol = update_mol
     assert self.r is None or np.shape(self.r)[1:] == np.shape(self.mols[0].r), "Mol(): r values do not match molecule!"
 
   def help(self):
-    for child in self.children:
+    for child in self.renderers:
       child.help()
 
   def draw(self, viewer, pass_num, print_timing=False):
-    for child in self.children:
+    for child in self.renderers:
       if getattr(child, 'visible', True):
         t0 = time.time() if print_timing else 0
         child.draw(viewer, pass_num)
@@ -621,10 +495,12 @@ class Mol:
   def n_mols(self):
     return len(self.mols) if self.r is None else len(self.r)
 
-  def load_mol(self, mol_number, print_timing=False, load_invisible=False):
+  def load_mol(self, mol_number, print_timing=False, load_invisible=False, r=None):
     self.mol = self.mols[mol_number] if self.r is None else self.mols[0]
-    self.curr_r = self.mol.r if self.r is None else self.r[mol_number]
-    for child in self.children:
+    self.curr_r = r if r is not None else self.r[mol_number] if self.r is not None else self.mol.r
+    if self.update_mol and (r is not None or self.r is not None):
+      self.mol.r = self.curr_r
+    for child in self.renderers:
       if getattr(child, 'visible', True) or load_invisible:
         t0 = time.time() if print_timing else 0
         child.set_molecule(self.mol, r=self.curr_r)
@@ -633,7 +509,7 @@ class Mol:
           print("  %s: %.2f ms" % (child_name, (time.time() - t0)*1000.0))
 
   def on_key_press(self, viewer, keycode, key, mods):
-    for child in self.children:
+    for child in self.renderers:
       if getattr(child, 'focused', True) and getattr(child, 'visible', True):
         if child.on_key_press(viewer, keycode, key, mods):
           return True
@@ -641,8 +517,8 @@ class Mol:
 
 
 class Files:
-  def __init__(self, files, **kwargs):
-    self.load_mol_kwargs = kwargs
+  def __init__(self, files, hydrogens=False, **kwargs):
+    self.hydrogens, self.load_mol_kwargs = hydrogens, kwargs
     # molecule list
     if type(files) is list:
       self.mol_files = files
@@ -661,6 +537,7 @@ class Files:
     mol_file = self.mol_files[mol_number]
     if mol_file not in self.mols:
       self.mols[mol_file] = load_molecule(mol_file, **self.load_mol_kwargs)
+      if self.hydrogens: self.mols[mol_file] = add_hydrogens(self.mols[mol_file])
     return self.mols[mol_file]
 
 
@@ -678,10 +555,10 @@ class VisDLC(VisGeom):
  Bksp: reset coordinate
 """)
 
-  def set_molecule(self, mol):
-    super(VisDLC, self).set_molecule(mol)
+  def set_molecule(self, mol, r=None):
+    super(VisDLC, self).set_molecule(mol, r)
     self.dlc = DLC(self.mol, recalc=1)
-    self.dlc.init()
+    self.dlc.init(r)
     self.S = dlc.active()
     self.initialS = self.S
     self.coord_idx = 0
@@ -716,7 +593,7 @@ class VisVectors:
   def __init__(self, vec_fn=1.0, style='stick', radius=None, colors=None, origin=None):
     """ vec_fn can be a list of (vec_start, vec_end) pairs (or the transpose of this), or a single list of
       vectors, which will be assumed to originate from points mol.r, or a function returning one the above,
-      given a Molecule; if vec_fn is scalar, it given the length of x,y,z vectors drawn from origin
+      given a Molecule; if vec_fn is scalar, it gives the length of x,y,z vectors drawn from origin
     """
     if np.isscalar(vec_fn):
       origin = np.zeros(3) if origin is None else np.array(origin)
@@ -750,10 +627,22 @@ class VisVectors:
     return False
 
 
-## Tests
+# show lat, long when we have text support?
+class VisGlobe:
 
-if __name__ == "__main__":
-  from test_molecules import *
+  def __init__(self):
+    # github.com/bgolus/EquirectangularSeamCorrection/blob/main/Assets/8081_earthmap10k.jpg
+    self.renderer = BallRenderer(texture=DATA_PATH + "/earth1K.jpg", inset=True)
 
-  mols = [water_tip3p_xyz, water_dimer_tip3p_xyz, C2H3F_noFF_xyz, ethanol_old_oplsaa_xyz]
-  Chemvis([ Mol([load_molecule(m) for m in mols], [ VisGeom(style='licorice') ]) ]).run()
+  def __repr__(self):
+    return "VisGlobe()"
+
+  def draw(self, viewer, pass_num):
+    if pass_num == 'opaque':
+      self.renderer.draw(viewer)
+
+  def set_molecule(self, mol, r=None):
+    self.renderer.set_data([(0,0,0)], radii=[3], colors=None)
+
+  def on_key_press(self, viewer, keycode, key, mods):
+    return False

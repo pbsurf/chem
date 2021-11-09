@@ -170,7 +170,7 @@ class DLC:
     # remaining args (e.g. eps, maxit) and constraints
     for key, val in kargs.items():
       if not hasattr(self, key):
-        raise AttributeError, key
+        raise AttributeError(key)
       setattr(self, key, val)
     if constrain:
       self.constrain(constrain)
@@ -208,7 +208,7 @@ class DLC:
     if newX is None:
       newX = self.toxyz(S)
     if newX is None:
-      print "DLC update rejected: unable to generate Cartesians"
+      print("DLC update rejected: unable to generate Cartesians")
       return False
     self.S = S
     self.X = newX

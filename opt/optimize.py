@@ -5,12 +5,14 @@ from ..molecule import calc_RMSD
 from .coords import *
 
 
-def moloptim_mon(r, r0, E, G, Gc, timing):
+def moloptim_mon(r, r0, E, G, Gc, timing={}):
   rmsd = calc_RMSD(r0, r)
-  # RMS grad per atom; note that |proj g| printed by minimize is max(abs(grad))
-  rmsgrad = np.sqrt(np.sum(G*G)/len(G))
-  rmsgradc = np.sqrt(np.sum(Gc*Gc)/len(Gc))
-  print("***ENERGY: {:.6f} H, RMS grad: {:.6f} H/Ang, ({:.6f} H/Ang), RMSD: {:.3f} Ang, Coord update: {:.3f}s, E,G calc: {:.3f}s".format(E, rmsgrad, rmsgradc, rmsd, timing['coords'], timing['calc']))
+  # note that |proj g| printed by minimize is max(abs(grad)) ... but won't print if verbose < 0
+  rmsG, rmsGc = np.sqrt(np.sum(G*G)/len(G)), np.sqrt(np.sum(Gc*Gc)/len(Gc))  # RMS grad per atom
+  maxG, maxGc = np.max(np.abs(G)), np.max(np.abs(Gc))  # largest grad component - for gtol
+  df = (timing.get('Eprev', E) - E)/max(abs(E), abs(timing.get('Eprev', E)))  # for ftol
+  # \u212B is symbol for Angstrom
+  print("[{:3d}] E: {:.6f} H ({:.2E}), G (H/\u212B): rms {:.6f}, max {:.6f} ({:.6f}, {:.6f}), RMSD: {:.3f} \u212B, Time: {:.3f}s ({:.3f}s)".format(timing.get('neval', 0), E, df, rmsG, maxG, rmsGc, maxGc, rmsd, timing.get('total', 0), timing.get('calc', 0)))
 
 
 def monitor(fn):
@@ -50,7 +52,9 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
     mon=moloptim_mon, vis=None, raiseonfail=True, verbose=True, maxiter=1000):
   """ Given `fn` accepting r array and additional args `fnargs` and returning energy and gradient of energy,
     find r which minimizes energy, starting from `r0`.  Internal coordinates, e.g., can use used by passing
-    appropriate object for `coords`; if coords are already inited, initial point can be set by S0 instead of r0
+    appropriate object for `coords`; if coords are already inited, initial point can be set by S0 instead of
+    r0. `verbose`=1: print every iteration; 0: call `mon` every iter, print optimization status at start and
+    finish; -1: only call `mon` (every iteration); -2: only call `mon` at start and finish
   """
   if S0 is not None:
     assert r0 is None, "Cannot pass both r0 and S0"
@@ -60,14 +64,14 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
     r0 = mol.r if r0 is None else r0
     coords = XYZ(r0) if coords is None else coords
     coords.init(r0)
-  updateok = [False]
+  objst = Bunch(updateok=False, neval=0)
   res = None
 
   def objfn(S):
     t0 = time.time()
     isnewS = np.any(coords.active() != S)
     if coords.update(S):
-      if isnewS: updateok[0] = True  # can't assign to outer vars!!! - fixed in python 3 w/ nonlocal keyboard
+      if isnewS: objst.updateok = True  # can't assign to outer vars!!! - fixed in python 3 w/ nonlocal keyboard
       r = coords.xyzs()
       t1 = time.time()
       E, G = fn(r, **fnargs) if mol is None else fn(mol, r, **fnargs)
@@ -76,24 +80,27 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
       # idea of Gc is to get cartesian grad excluding constraints
       Gc = coords.gradtoxyz(gS) if hasattr(coords, 'gradtoxyz') else gS  #np.zeros(1)
       # call monitor fn, e.g. to print additional info
-      mon(r, r0, E, G, Gc, dict(coords=t1-t0, calc=t2-t1, total=t2-t0))
-      if vis and mol:
-        mol.r = r
-        vis.refresh(repaint=True)
+      if mon and (verbose >= -1 or objst.neval == 0):
+        mon(r, r0, E, G, Gc, dict(objst, coords=t1-t0, calc=t2-t1, total=t2-t0))
+      if vis:
+        vis.refresh(r=r, repaint=True)
+      objst.neval = objst.neval + 1
+      objst.Eprev = E
       return E, np.ravel(gS)
     else:
       print("Coord breakdown for S = \n%r" % S)
       # optimizer must restart
       raise ValueError('Coord breakdown')
 
-  print("optimize started at %s" % time.asctime())
+  if verbose > 0:
+    print("optimize started at %s" % time.asctime())
   while maxiter > 0:
     try:
       if optimizer is not None:
         res = optimizer(objfn, np.ravel(coords.active()), gtol=gtol, ftol=ftol, maxiter=maxiter)
       else:
         res = scipy.optimize.minimize(objfn, np.ravel(coords.active()),
-            jac=True, method='L-BFGS-B', options=dict(disp=verbose, gtol=gtol, ftol=ftol, maxiter=maxiter))
+            jac=True, method='L-BFGS-B', options=dict(iprint=int(verbose), gtol=gtol, ftol=ftol, maxiter=maxiter))
       maxiter -= res.nit
       break
     except ValueError as e:
@@ -101,13 +108,17 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
         break
       if e.message != 'Coord breakdown':
         raise
-      if not updateok[0]:
+      if not objst.updateok:
         print("Coord breakdown on first iteration - unable to continue")
         break
-      updateok[0] = False
+      objst.updateok = False
       coords.init()  # reinit with last good cartesians
 
-  print("optimize finished at %s" % time.asctime())
+  if verbose > 0:
+    print("optimize finished at %s" % time.asctime())
+  elif verbose < -1 and mon:
+    verbose = -1
+    objfn(res.x)
   if res and res.success:
     coords.update(res.x)
   elif raiseonfail:

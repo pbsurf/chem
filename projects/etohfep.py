@@ -4,6 +4,7 @@ from chem.mm import *
 from chem.io import load_molecule, write_xyz, write_hdf5
 from chem.io.openmm import *
 from chem.fep import *
+from chem.data.test_molecules import ethanol_gaff_xyz, ethane_gaff_xyz
 
 # Refs:
 # - openmm.org/tutorials/alchemical-free-energy/
@@ -17,29 +18,6 @@ from chem.fep import *
 # - 10.33011/livecoms.2.1.18378 / arxiv.org/pdf/2008.03067.pdf - Alchemical free energy best practices
 # - github.com/samplchallenges - blind challenges for binding free energies and more; SAMPL6 paper 10.1007/s10822-020-00290-5 is useful
 
-ethanol_gaff = """9  molden generated ambfor .xyz
-1  c3     -1.208   -0.243   -0.031  901  0.000      2      4      5      6
-2  c3      0.089    0.560    0.035  902  0.000      1      3      7      8
-3  oh      1.215   -0.315   -0.107  903  0.000      2      9
-4  hc     -1.297   -0.796   -0.991  904  0.000      1
-5  hc     -2.097    0.419    0.053  905  0.000      1
-6  hc     -1.273   -0.988    0.792  906  0.000      1
-7  h1      0.160    1.117    0.994  907  0.000      2
-8  h1      0.114    1.311   -0.783  908  0.000      2
-9  ho      1.298   -0.828    0.686  909  0.000      3
-"""
-
-ethane_gaff = """8  ethane (molden ambfor xyz)
-1  c3     -1.208   -0.243   -0.031  801  0.000      2      3      4      5
-2  c3      0.089    0.560    0.035  802  0.000      1      6      7      8
-3  hc     -1.297   -0.796   -0.991  803  0.000      1
-4  hc     -2.097    0.419    0.053  804  0.000      1
-5  hc     -1.273   -0.988    0.792  805  0.000      1
-6  hc      0.160    1.117    0.994  806  0.000      2
-7  hc      0.114    1.311   -0.783  807  0.000      2
-8  hc      1.215   -0.315   -0.107  808  0.000      2
-"""
-
 T0 = 300  # Kelvin
 
 filename = 'ethanol0'
@@ -48,8 +26,8 @@ try:
   mol = load_molecule(filename + '.xyz')
   ligparm_key = read_file(filename + '.ff.xml')
 except:
-  mol = resp_prepare(load_molecule(ethanol_gaff, residue='LIG'), avg=[[3,4,5], [6,7]])  #, mmtype0=901)
-  #mol = resp_prepare(load_molecule(ethane_gaff, residue='LIG'), constr=[[0,1]], avg=[[2,3,4], [5,6,7]])  #, mmtype0=801)
+  mol = resp_prepare(load_molecule(ethanol_gaff_xyz, residue='LIG'), avg=[[3,4,5], [6,7]])
+  #mol = resp_prepare(load_molecule(ethane_gaff_xyz, residue='LIG'), constr=[[0,1]], avg=[[2,3,4], [5,6,7]])
   mol.mmtype = mol.name
   write_xyz(mol, filename + '.xyz')
   ligparm_key = openmm_resff(mol)

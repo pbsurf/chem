@@ -16,6 +16,8 @@ from chem.qmmm.prepare import protonation_check, neutralize
 # Note that block select can be used to paste multiple indented lines into Python interactive prompt
 
 ## TODO:
+# - QM/MM opt with full QM region (maybe try chain I alone first); use some of the new code below to explore results, then work on reaction path
+
 # - in general, every atom of HIS has different mmtype depending on protonation state, so we can't simply
 #  remove H atom and compute MM energy ... ideally, we'd be able to add hydrogens and set mmtypes in python
 #  code rather than with Tinker
@@ -46,11 +48,6 @@ from chem.qmmm.prepare import protonation_check, neutralize
 #  subtracting constant from density doesn't work; isosurfaces are probably the best approach!
 # - alternatives to current mol + r design?  Dict of r arrays as a member of Molecule?
 # - move M1, M2, Q1 to qmmm, make byconnectivity/byproximity top-level attr
-
-## Next:
-
-# - fn optimization notes, code
-# - QM/MM opt with full QM region (maybe try chain I alone first); use some of the new code below to explore results, then work on reaction path
 
 # Misc ideas:
 # - try adding polarizations fns (6-31G**) to cap atoms?
@@ -83,7 +80,7 @@ def vis_compare_geom(*args):
 
 
 def vis_nonbonded():
-  vis = Chemvis(Mol(trypsin, [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, color_interp='ramp'), VisGeom(style='lines', sel='protein'), VisGeom(style='lines', sel='not protein'), VisGeom(style='licorice', radius=0.5, sel=qmatoms), VisContacts(partial(tinker_contacts, key=tinker_qmmm_key, sel="chain == 'I'", Ethresh=-20.0/KCALMOL_PER_HARTREE), radius=tinker_contacts_radii, colors=tinker_contacts_color) ]), fog=True).run()
+  vis = Chemvis(Mol(trypsin, [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, color_interp='ramp'), VisGeom(style='lines', sel='protein'), VisGeom(style='lines', sel='not protein'), VisGeom(style='licorice', radius=0.5, sel=qmatoms), VisContacts(partial(tinker_contacts, key=tinker_qmmm_key, sel="chain == 'I'", Ethresh=-20.0/KCALMOL_PER_HARTREE), radius=contacts_radii, colors=contacts_color) ]), fog=True).run()
   view_active_site(vis)
 
 

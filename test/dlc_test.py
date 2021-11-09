@@ -1,7 +1,8 @@
 from chem.molecule import *
 from chem.opt.dlc import *
 from chem.io import load_molecule
-from chem.data.test_molecules import water, ethanol, C2H3F
+from chem.data.test_molecules import water, ethanol_old_oplsaa_xyz, C2H3F
+ethanol = ethanol_old_oplsaa_xyz
 
 ## Notes
 

@@ -2,7 +2,6 @@ import numpy as np
 from scipy.spatial.ckdtree import cKDTree
 from ..molecule import *
 from ..data.pdb_bonds import PDB_PROTEIN
-from .grid import r_grid, esp_grid
 
 
 ## fns for preparing Molecule for QM/MM calculations
@@ -59,15 +58,22 @@ def protonation_check(mol, pH=7.4):
 def geometry_check(mol, min_angle=np.pi/2):
   """ check molecule for unusual bonds or angles (by default < 90 deg - reasonable threshold for proteins) """
   bonds, angles, diheds = mol.get_internals()
-  for a in angles:
-    if mol.angle(a) < min_angle:
-      print("Warning: angle %s = %.2f degrees" % (a, 180*mol.angle(a)/np.pi))
+  badangles = [a for a in angles if mol.angle(a) < min_angle]
+  for a in badangles:
+    print("Warning: angle {} = {:.2f} degrees".format(a, 180*mol.angle(a)/np.pi))
+  ck = cKDTree(mol.r)
+  tooclose = ck.query_pairs(0.75)
+  for pair in tooclose:
+    print("Warning: distance {} = {:.3f} Ang".format(pair, mol.bond(pair)))
   guessed_bonds = guess_bonds(mol.r, mol.znuc)
   bonds_set, guessed_set = frozenset(bonds), frozenset(guessed_bonds)
-  for extra_bond in bonds_set - guessed_set:
-    print("Warning: unexpected bond %s" % extra_bond)
-  for missing_bond in guessed_set - bonds_set:
-    print("Warning: possibly missing bond %s" % missing_bond)
+  extra_bonds = bonds_set - guessed_set
+  for extra_bond in extra_bonds:
+    print("Warning: unexpected bond {}".format(extra_bond))
+  missing_bonds = guessed_set - bonds_set
+  for missing_bond in missing_bonds:
+    print("Warning: possibly missing bond {}".format(missing_bond))
+  return list(set(tooclose) | extra_bonds | missing_bonds), badangles
 
 
 # Tinker's build solvent box function (xyzedit option 19) places molecules at random positions w/ random
@@ -83,10 +89,16 @@ def solvent_box(mol, ncopies, extents, overfill=1.5):
   solvent = Molecule()
   rcs = (extents[1] - extents[0])*np.random.rand(int(overfill*ncopies), 3) + extents[0]  # centers
   if overfill > 1:
-    pairs = np.triu_indices(len(rcs), 1)
-    dr = np.abs((rcs[:,None,:] - rcs[None,:,:])[pairs])  # calc distance w/ PBCs
-    dists = np.linalg.norm(np.min([dr, np.abs(dr - (extents[1] - extents[0]))], axis=0), axis=1)
-    rmpairs = np.transpose(pairs)[np.argsort(dists)]
+    # brute force pair distance calc runs out of memory for larger systems
+    #pairs = np.triu_indices(len(rcs), 1)
+    #dr = np.abs((rcs[:,None,:] - rcs[None,:,:])[pairs])  # calc distance w/ PBCs
+    #dists = np.linalg.norm(np.min([dr, np.abs(dr - (extents[1] - extents[0]))], axis=0), axis=1)
+    #rmpairs = np.transpose(pairs)[np.argsort(dists)]
+    kd = cKDTree(rcs)
+    dists, locs = kd.query(rcs, k=[2,3,4,5])
+    #distance_upper_bound=2*(np.prod(extents[1,:] - extents[0,:])/ncopies)**(1/3))
+    pairs = np.reshape(np.dstack([locs.T, [range(len(rcs))]*locs.shape[1]]), (-1,2))
+    rmpairs = pairs[np.argsort(np.ravel(dists.T))]
     nkeep = len(rcs)
     keep = np.ones(nkeep, dtype=bool)
     for a,b in rmpairs:
@@ -103,9 +115,9 @@ def solvent_box(mol, ncopies, extents, overfill=1.5):
 
 
 def water_box(sides, mmtypes=None):
-  from ..data import test_molecules
+  from .build import TIP3P_xyz
   from ..io import load_molecule
-  tip3p = load_molecule(test_molecules.water_tip3p_xyz, center=True, residue='HOH')
+  tip3p = load_molecule(TIP3P_xyz, center=True, residue='HOH')
   if mmtypes is not None:
     tip3p.mmtype = mmtypes  #[2001, 2002, 2002] -- Tinker Amber types
   # for water
@@ -128,7 +140,8 @@ def water_box(sides, mmtypes=None):
 # solvent molecules are assumed to be placed at random independent positions, so that we can just replace
 #  first N solvent molecules with ions to neutralize system (if ion_p and/or ion_n are provided)
 # - alternatively, we could just choose solvent molecules for replacement randomly
-def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None, solute_res=None):
+def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None, solute_res=None, solvent_chain=None):
+  """ combine molecules `mol` and `solvent`, removing any residues in `solvent` within `d` Ang of `mol` """
   kd = cKDTree(mol.r)
   # could try a prefiltering step using mol.extents
   dists, locs = kd.query(solvent.r, distance_upper_bound=d)
@@ -144,13 +157,18 @@ def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None, solute_res=None):
       if abs(net_charge) <= 0.5*abs(ion.mmq):
         break
       if ii not in remove:
-        r_ii = np.sum([mol.atoms[jj].r for jj in res.atoms], axis=0)/len(res.atoms)
+        r_ii = np.mean([solvent.atoms[jj].r for jj in res.atoms], axis=0)
         remove.add(ii)
         solvated.append_atoms(ion, r=ion.r + r_ii)
         net_charge += ion.mmq
 
   retain = [ii for ii in range(len(solvent.residues)) if ii not in remove]
-  solvated.append_atoms(solvent.extract_atoms(resnums=retain))
+  solvent = solvent.extract_atoms(resnums=retain)
+  if solvent_chain is not None:
+    assert solvent_chain not in solvated.get_chains(), "Solvent chain already in use!"
+    for ii,res in enumerate(solvent.residues):
+      res.pdb_num, res.chain = ii+1, solvent_chain
+  solvated.append_atoms(solvent)
   return solvated
 
 
@@ -161,6 +179,7 @@ def neutralize(mol, d=3.0, ion_p=None, ion_n=None, grid_density=0.5, chain='X'):
    `grid_density`) with largest electrostatic potential.  Intended for systems in vacuum or implicit
     solvent; should be followed by MM minimization
   """
+  from ..qmmm.grid import r_grid, esp_grid
   extents = mol.extents(pad=2.0/grid_density)
   grid = r_grid(extents, grid_density)
   kd = cKDTree(mol.r)

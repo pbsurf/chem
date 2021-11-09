@@ -3,6 +3,7 @@
 from chem.molecule import *
 from chem.io import *
 from chem.vis.chemvis import *
+from chem.theo import mol_density
 
 # https://www.cp2k.org/howto:biochem_qmmm
 ligA_xyz = """24  chorismate
@@ -76,18 +77,7 @@ for ii in qmmm.qmatoms:
 
 pyscf_EandG(cm, qmatoms=qmatoms)
 
-
-a = 5.0  # 5 x 5 x 5 Ang bins
-extents = cm.extents()
-range = extents[1] - extents[0]
-nbins = np.array(np.ceil(range/a), dtype=np.uint)
-counts = np.zeros(nbins)
-for atom in cm.atoms:
-  counts[ tuple(np.int_((atom.r - extents[0])/a)) ] += 1 if atom.znuc > 1 else 0  # += atom.znuc
-density = counts/(a*a*a)
-histr = np.histogram(np.ravel(density), bins=np.max(counts)+1)
-# max ~0.09 heavy atoms/Ang^3
-# water at 1 g/mL: .056 mol/mL -> 0.056*NA/10^24 Ang^3 -> 3.37e22/1e24 -> 3.37e-2 -> 0.03 heavy atoms/Ang^3
+histr = mol_density(cm)
 
 
 vis = Chemvis(Mol(cm, [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, color_interp='ramp'), VisGeom(style='lines', sel='protein'), VisGeom(style='lines', sel='not protein'), VisGeom(style='licorice', radius=0.5, sel=qmatoms) ]), fog=True).run()

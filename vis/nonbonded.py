@@ -110,6 +110,19 @@ def tinker_E_breakdown(mol, key, r=None, sel=None, prefix=None, cutoff=5.0):
     except: pass
   return Eindv
 
+
+def NCMM_contacts(mol, r=None, sel=None, Ethresh=-10.0/KCALMOL_PER_HARTREE):
+  from ..mm import NCMM
+  E = {}
+  NCMM(mol)(mol, r, components=E)
+  sel = range(mol.natoms) if sel is None else mol.select(sel)
+  pairs = [ (i,j) for i in range(mol.natoms) for j in range(i+1, mol.natoms)
+      if E['Eqq'][i,j] + E['Evdw'][i,j] < Ethresh and i in sel and j in sel ]
+  mol.Ebreakdown = { 'charge': {(i,j): E['Eqq'][i,j] for i,j in pairs},
+      'vdw-lj': {(i,j): E['Evdw'][i,j] for i,j in pairs} }
+  return pairs
+
+
 # kB*T is ~ 0.6 kcal/mol
 def tinker_contacts(mol, key=None, r=None, sel=None, Ethresh=-10.0/KCALMOL_PER_HARTREE):
   if not hasattr(mol, 'Ebreakdown') or r is not None:
@@ -119,12 +132,12 @@ def tinker_contacts(mol, key=None, r=None, sel=None, Ethresh=-10.0/KCALMOL_PER_H
       if mol.Ebreakdown['charge'].get(pair, 0) + mol.Ebreakdown['vdw-lj'].get(pair, 0) < Ethresh ]
 
 
-def tinker_contacts_radii(mol, atoms):
+def contacts_radii(mol, atoms):
   Etot = mol.Ebreakdown['charge'].get(atoms, 0) + mol.Ebreakdown['vdw-lj'].get(atoms, 0)
   return 0.5 + 4.0*Etot/(-100.0/KCALMOL_PER_HARTREE)
 
 
-def tinker_contacts_color(mol, atoms):
+def contacts_color(mol, atoms):
   Etot = mol.Ebreakdown['charge'].get(atoms, 0) + mol.Ebreakdown['vdw-lj'].get(atoms, 0)
   return color_ramp([Color.lime, Color.yellow], mol.Ebreakdown['charge'].get(atoms, 0)/Etot)
 
@@ -133,12 +146,12 @@ class VisContacts:
   """ Class for visualizing non-covalent interactions """
 
   # in the future, we can add a (dashed) cylinder option (each dash as separate capped cylinder)
-  def __init__(self, fn, radius=2.0, colors=Color.light_grey, style='lines', dash_len=0.1):
+  def __init__(self, fn=None, radius=2.0, colors=Color.light_grey, style='lines', dash_len=0.1):
     """ `fn` takes a molecule and returns list of atom pairs (tuples) for which interaction should be shown;
       can also set other attributes of molecule for use by `radii` and `colors`, which can be fns taking
       molecule and atom pair (or just constant values).
     """
-    self.contacts_fn = fn
+    self.contacts_fn = NCMM_contacts if fn is None else fn
     self.radius = radius
     self.colors = colors
     self.line_renderer = LineRenderer(dash_len=dash_len)
@@ -150,7 +163,7 @@ class VisContacts:
   def set_molecule(self, mol, r=None):
     contacts = self.contacts_fn(mol, r=r)
     r = mol.r if r is None else r
-    bounds = np.array(zip(r[ [b[0] for b in contacts] ], r[ [b[1] for b in contacts] ]))
+    bounds = r[np.asarray(contacts)]
     radii = [self.radius(mol, b) for b in contacts] if callable(self.radius) else [self.radius]*len(bounds)
     colors = [self.colors(mol, b) for b in contacts] if callable(self.colors) else [self.colors]*len(bounds)
     self.line_renderer.set_data(bounds, radii, colors)

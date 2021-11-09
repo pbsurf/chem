@@ -4,6 +4,9 @@ from pyscf import gto, scf, qmmm, lib
 from ..data.elements import ELEMENTS
 from ..basics import ANGSTROM_PER_BOHR
 
+# pyscf 1.7.5/6 overwrites time.time w/ time.perf_counter!
+assert time.time is not time.perf_counter, "Fix pyscf/lib/logger.py"
+
 # from https://github.com/pyscf/pyscf/blob/master/examples/qmmm/30-force_on_mm_particles.py
 # mol: pyscf Mole, dm: make_rdm1() from pyscf calculation, coords: MM charge positions in Ang, charges: MM q
 # returns MM charge gradient in Hartree/Bohr

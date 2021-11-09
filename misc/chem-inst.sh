@@ -101,6 +101,7 @@ rm molden5.8.full.ubuntu.64.tar.gz
 # packages needed to build Molden from source
 #$APTINST xutils-dev libglu-dev libgl-dev libglx-devlibx11-dev gfortran
 
+echo "Run _download_amber_data() and _download_build_data() in chem package!"
 
 ## optional stuff
 

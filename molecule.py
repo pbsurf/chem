@@ -31,7 +31,7 @@ class Atom:
   """
   def __init__(self, name='', znuc=0, r=None, mmtype=0, mmq=0.0, mmconnect=None, resnum=None, **kwargs):
     self.name = name
-    self.znuc = znuc
+    self.znuc = ELEMENTS[znuc.title()].number if type(znuc) is str else znuc
     # don't use np.asarray because we want our own copy of r
     self.r = np.array(r, dtype=np.float64) if r is not None else []
     self.mmtype = mmtype
@@ -75,8 +75,9 @@ class Molecule:
       atoms = [Atom(r=ra, znuc=za) for ra,za in zip(r, znuc)]
     elif atoms is not None and atoms.__class__ == Molecule:
       residues = copy.deepcopy(atoms.residues) if residues is None else residues
-      atoms = copy.deepcopy(atoms.atoms)
-      pbcbox = copy.deepcopy(atoms.pbcbox)
+      pbcbox = copy.deepcopy(atoms.pbcbox) if pbcbox is None else pbcbox
+      header = copy.deepcopy(atoms.header) if header is None else header
+      atoms = copy.deepcopy(atoms.atoms)  # notice that this overwrites `atoms`!
     self.atoms = atoms if atoms is not None else []
     self.residues = residues if residues is not None else []
     if r is not None and znuc is None:
@@ -166,30 +167,34 @@ class Molecule:
 
   def remove_atoms(self, sel):
     """ remove atoms specified by `sel` (in-place) """
-    idxs = select_atoms(self, sel) if callable(sel) or type(sel) is str else sel
-    # process indices from largest to smallest index so it remains valid
-    idxs.sort(reverse=True)
-    for ii in idxs:
-      for atom in self.atoms:
-        atom.mmconnect = [a - 1 if a > ii else a for a in atom.mmconnect if a != ii]
-      for residue in self.residues:
-        residue.atoms = [a - 1 if a > ii else a for a in residue.atoms if a != ii]
-      # remove residue if now empty
-      resnum = self.atoms[ii].resnum
-      del self.atoms[ii]
-      if resnum is not None and not self.residues[resnum].atoms:
-        for jj in range(ii+1, len(self.residues)):
-          for a in self.residues[jj].atoms:
-            self.atoms[a].resnum -= 1
-        del self.residues[resnum]
-
+    idxs = frozenset( self.select(sel) if callable(sel) or type(sel) is str else sel )
+    residxs = frozenset([ ii for ii,res in enumerate(self.residues) if res.atoms and not set(res.atoms) - idxs ])
+    gen1, gen2 = iter(range(2**31)), iter(range(2**31))  # we could use argsort() instead, but this is clearer
+    idx_map = [ (2**31 if ii in idxs else next(gen1)) for ii in range(len(self.atoms)) ]
+    res_map = [ (2**31 if ii in residxs else next(gen2)) for ii in range(len(self.residues)) ]
+    self.atoms = [a for ii,a in enumerate(self.atoms) if ii not in idxs]
+    self.residues = [res for ii,res in enumerate(self.residues) if ii not in residxs]
+    for a in self.atoms:
+      a.mmconnect = [idx_map[ii] for ii in a.mmconnect if ii not in idxs]
+      a.resnum = res_map[a.resnum]
+    for res in self.residues:
+      res.atoms = [idx_map[ii] for ii in res.atoms if ii not in idxs]
     return self
 
 
-  def set_residue(self, name):
-    self.residues = [Residue(name=name, atoms=self.listatoms(), het=True)]
+  def set_residue(self, name, chain=None, het=True):
+    self.residues = [Residue(name=name, atoms=self.listatoms(), chain=chain, het=het)]
     self.resnum = [0]*len(self.atoms)
     return self
+
+
+  def atomres(self, ii):
+    """ return residue object for given atom index """
+    return self.residues[self.atoms[ii].resnum]
+
+
+  def mass(self, ii=None):
+    return np.array([ELEMENTS[a.znuc].mass for a in self.atoms]) if ii is None else ELEMENTS[self.atoms[ii].znuc].mass
 
 
   def select(self, *args, **kwargs):
@@ -215,34 +220,34 @@ class Molecule:
     return list(conn)
 
 
-  def get_nearby(self, qmatoms, radius):
+  def get_nearby(self, qmatoms, radius, active=None, dists=False):
     """ return atoms within radius of any atom in qmatoms, excluding atoms in qmatoms """
-    nearby = []
-    for ii in self.listatoms():
-      if ii not in qmatoms:
-        for jj in qmatoms:
-          if norm(self.atoms[ii].r - self.atoms[jj].r) <= radius:
-            nearby.append(ii)
-            break
-    # ---
-    return nearby
+    exclude = set(qmatoms) | set(mol.listatoms(exclude=active) if active is not None else [])
+    dd = [ np.inf if ii in exclude else min(norm(a.r - self.atoms[jj].r) for jj in qmatoms)
+        for ii,a in enumerate(self.atoms) ]
+    nearby = [ii for ii,d in enumerate(dd) if d <= radius]
+    return (nearby, [dd[ii] for ii in nearby]) if dists else nearby
 
 
   def set_bonds(self, bonds, replace=True):
     """ set mmconnect from list of pairs specifying bonded atoms; returns self for chaining """
+    bonds = [bonds] if len(bonds) > 0 and type(bonds[0]) is int else bonds
     if replace:
       for atom in self.atoms:
         atom.mmconnect = []
-    for bond in bonds:
-      self.atoms[bond[0]].mmconnect.append(bond[1])
-      self.atoms[bond[1]].mmconnect.append(bond[0])
+    for a,b in bonds:
+      if b not in self.atoms[a].mmconnect:  # prevent duplicate bonds
+        self.atoms[a].mmconnect.append(b)
+        self.atoms[b].mmconnect.append(a)
     return self
 
 
+  def add_bonds(self, bonds):
+    return self.set_bonds(bonds, replace=False)
+
+
   def get_bonds(self, active=None):
-    """ because of angle and diheds, get_internals() can be slow for large molecules; use this method to get
-    just bonds
-    """
+    """ because of angle and diheds, get_internals() can be slow for large molecules """
     if active is not None:
       return [ (ii, jj) for ii in active for jj in self.atoms[ii].mmconnect if jj > ii and jj in active ]
     else:
@@ -271,22 +276,19 @@ class Molecule:
 
 
   ## geometry manipulation
-  # Methods for manipulating molecular geometry by changing
-  #  bond lengths, angles, and dihedrals.  Only atoms on one side
-  #  side of bond/angle/dihedral are moved; see MMTK for code to
-  #  avoid "overall translation/rotation" (is this just equiv to
-  #  aligning to original?)
-  # It should be clear from this code that performing manipulations
-  #  in Cartesian coords can't be much (if at all) harder than with z-matrix
+  # Methods for manipulating molecular geometry by changing bond lengths, angles, and dihedrals.  Only atoms
+  #  on one side side of bond/angle/dihedral are moved; see MMTK for code to avoid "overall translation/
+  #  rotation" (is this just equiv to aligning to original?).  Should be clear from this code that performing
+  #  manipulations in Cartesian coords can't be much (if at all) harder than with Z-matrix
   # There's no reason to use calc_bond/angle - the calculations are one-liners
   # See: MMTK InternalCoordinates.py
-  # TODO: option to retain (i.e., memoize) partition, since it may be time
-  #  consuming to calculate for large molecules (?)
 
   ## TODO: use set() instead of list here!
-  def partition_mol(self, a1, a2):
-    # we include other atom in list to accomplish
-    #  isolation, then remove after fragment is built
+  def partition_mol(self, a1, a2, only2=False):
+    # optimization ... unless a2 connected to other atoms - then we need full partition to check for errors
+    if only2 and (not self.atoms[a2].mmconnect or self.atoms[a2].mmconnect == [a1]):
+      return [], [a2]
+    # we include other atom in list to accomplish isolation, then remove after fragment is built
     f1 = self.buildfrag(a1, [ a2 ])[1:]
     f2 = self.buildfrag(a2, [ a1 ])[1:]
     # make sure intersection is empty
@@ -319,7 +321,7 @@ class Molecule:
     bondvec = self.atoms[bond[1]].r - self.atoms[bond[0]].r
     oldlen = norm(bondvec)
     if newlen is not None:
-      f1, f2 = self.partition_mol(bond[0], bond[1]) if move_frag else ([], [bond[1]])
+      f1, f2 = self.partition_mol(bond[0], bond[1], only2=True) if move_frag else ([], [bond[1]])
       # translation vector
       delta = (newlen - (not rel and oldlen or 0))
       deltavec =  delta*bondvec/oldlen
@@ -330,11 +332,11 @@ class Molecule:
       return oldlen
 
 
-  # probably should use radians instead of degrees for new value! (fpr dihedral() too)
+  # probably should use radians instead of degrees for new value! (for dihedral() too)
   def angle(self, angle, newdeg=None, rel=False):
-    """ angle is triple of atoms specifying angle
-    only fragment containing 3rd atom of angle is rotated
-    rel indicates new angle is relative to current
+    """ return angle (in radians) defined by triple of atoms `angle`; if specified, angle is changed to
+     `newdeg` (in degrees) by rotating fragment containing 3rd atom of `angle`; rel=True indicates new angle
+     is relative to current
     """
     v12 = self.atoms[angle[0]].r - self.atoms[angle[1]].r
     v23 = self.atoms[angle[1]].r - self.atoms[angle[2]].r
@@ -344,7 +346,7 @@ class Molecule:
     # result is in radians (pi - converts to interior bond angle)
     olddeg = np.pi - np.arccos(np.dot(v12, v23))
     if newdeg is not None:
-      f1, f2 = self.partition_mol(angle[1], angle[2])
+      f1, f2 = self.partition_mol(angle[1], angle[2], only2=True)
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
       rotmat = rotation_matrix(np.cross(v23, v12), delta)
       rotcent = self.atoms[angle[1]].r
@@ -355,17 +357,16 @@ class Molecule:
       return olddeg
 
 
-  def dihedral(self, dihed, newdeg=None, rel=False):
-    """ dihed is set of 4 atoms specifying dihedral
-    only fragment containing 3rd atom of dihed is rotated
-    rel indicates new angle is relative to current
+  def dihedral(self, dihed, newdeg=None, rel=False, incl3=True):
+    """ return dihedral angle (in radians) defined by the set of 4 atoms `dihed`; if specified, angle is
+     changed to `newdeg` (in degrees) by rotating fragment containing 3rd atom (or 4th if incl3 == False) of
+     `dihed`; rel=True indicates new angle is relative to current
     """
     # we'll need v2 and v3 twice
-    v1, v2, v3, v4 = ( self.atoms[dihed[0]].r, self.atoms[dihed[1]].r,
-      self.atoms[dihed[2]].r, self.atoms[dihed[3]].r )
+    v1, v2, v3, v4 = [self.atoms[a].r for a in dihed]
     olddeg = calc_dihedral(v1, v2, v3, v4)
     if newdeg is not None:
-      f1, f2 = self.partition_mol(dihed[1], dihed[2])
+      f1, f2 = self.partition_mol(dihed[1], dihed[2]) if incl3 else self.partition_mol(dihed[2], dihed[3], only2=True)
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
       rotmat = rotation_matrix(v2 - v3, -delta)
       rotcent = self.atoms[dihed[2]].r
@@ -381,7 +382,7 @@ class Molecule:
   def __repr__(self):
     sr = lambda a: a if type(a) is str or safelen(a) < 10 else ("[<%d>]" % len(a))
     attrs = ["%s=%r" % (a, sr(getattr(self,a))) for a in dir(self) \
-        if not a.startswith('_') and not callable(getattr(self,a))]
+        if not a.startswith('_') and not callable(getattr(self,a)) and a != 'header']
     return ("Molecule(%s)" % ', '.join(attrs)).replace('\n', ' ')
 
 
@@ -398,8 +399,8 @@ class Molecule:
       return len(self.residues)
     if attr == 'bonds':
       return self.get_bonds()
-    if attr == 'mass':
-      return np.array([ELEMENTS[a.znuc].mass for a in self.atoms])
+    if attr == 'chains':
+      return list(dict.fromkeys(res.chain for res in self.residues))  # preserves order (in python 3)
     #if self.atoms and hasattr(self.atoms[0], attr):  # infinite loop if self.atoms not set
     if attr in self._atomattrs:
       return np.array([ getattr(atom, attr) for atom in self.atoms ])
@@ -443,20 +444,6 @@ def get_header(mol):
     today = time.strftime("%d-%b-%y", time.localtime()).upper()
     header = "CUSTOM MOLECULE                         %s   XXXX" % today
   return header
-
-
-# this will be very inefficient if used repeatedly
-def residue_chain(mol, resnum):
-  """ determine chain number of start, stop residue index for residue indexed by `resnum` """
-  chain, het = mol.residues[resnum].chain, mol.residues[resnum].het
-  start, stop = resnum, resnum
-  while start > 0 and mol.residues[start-1].chain == chain and mol.residues[start-1].het == het:
-    start -= 1
-  while stop < len(mol.residues) and mol.residues[stop].chain == chain and mol.residues[stop].het == het:
-    stop += 1
-  # count unique chains before start
-  chain_idx = len(set([mol.residues[ii].chain for ii in range(start-1)]))
-  return chain, chain_idx, start, stop
 
 
 def mol_fragments(mol, active=None):
@@ -559,8 +546,8 @@ def sel_fn(atom, mol, idx):
     resname = residue.name
     resatoms = residue.atoms
     chain = residue.chain
-    pdb_resid = residue.pdb_num
-    pdb_resnum = int(pdb_resid)
+    pdb_resid = str(residue.pdb_num)
+    pdb_resnum = int(residue.pdb_num)
   except: pass
   # booleans
   polymer = resname in PDB_STANDARD
@@ -576,14 +563,13 @@ def sel_fn(atom, mol, idx):
 
 def decode_atom_sel(sel):
   """ convert atom selection string `sel` to function (just returns `sel` if not a string) """
-  if type(sel) is str:
+  if callable(sel):
+    return sel
+  elif type(sel) is str:
     return decode_atom_sel_str(sel)
-  try:
-    if type(sel[0]) is int:
-      sel_set = frozenset(sel)
-      return lambda atom, mol, idx: idx in sel_set
-  except: pass
-  return sel
+  else:
+    sel_set = frozenset(sel)
+    return lambda atom, mol, idx: idx in sel_set
 
 
 # PDB selection syntax - succinct atom selection with PDB fields - similar to pymol selection macros:
@@ -597,35 +583,45 @@ def decode_atom_sel(sel):
 #  all equivalent: '/A//', '/A/', '/A', 'A//', 'A * *', '/A *', '/A/*', '/A/*/*', ...
 # Can be passed as `pdb` keyword arg or in `sel` if first char is / or *
 
-# make this a method of Molecule?
 def select_atoms(mol, sel=None, sort=None, pdb=None):
   if sort is True:
     sort = lambda atom, mol, ii: (atom.resnum, atom.name, ii)  # default sort key
   elif sort is not None:
     sort = decode_atom_sel(sort)
+  elif sel is None and pdb is None:
+    return range(len(mol.atoms))
   pdb = sel if type(sel) is str and (sel.startswith('/') or sel.startswith('*')) else pdb
   if pdb:
     selected = []
     pdbsels = re.sub(r'\s*,\s*', ',', pdb).split(';')  # remove spaces around commas
     for pdbsel in pdbsels:
-      ss = pdbsel.strip().replace('/', ' ').split()  #re.split(r'\s*/\s*|\s+', pdbsel.strip())  # split on space or /
+      ss = re.split(r'\s*/\s*|\s+', pdbsel.strip())  # split on space or /  #pdbsel.strip().replace('/', ' ').split()
       ss = ss[1:] if not ss[0] else ss
       if not ss: continue  # empty selection
       assert len(ss) <= 3, "Too many fields in " + pdbsel
       # extend to contain all three fields; blank or * means match all
       full_ss = (['']*(3-len(ss)) + ss)  #if ss[0] else (ss[1:] + ['']*(3-len(ss)+1))
-      res_field = 'resname' if full_ss[1][-3:].isalpha() else 'pdb_resid'  # support residue name or number
+      res_field = 'resname' if full_ss[1][-3:-2].isalpha() else 'pdb_resid'  # support residue name or number
       atomsel = " and ".join(
           (f + " not in " + str(s[1:].split(','))) if s[0] == '~' else (f + " in " + str(s.split(','))) \
           for f, s in zip(['chain', res_field, 'name'], full_ss) if s and s != '*')
       # should we join with 'or' and create a single selection string instead?
       selected.extend(select_atoms(mol, atomsel if atomsel else 'True'))  # '*' will give empty atomsel
-  elif safelen(sel) > 0 and type(sel[0]) is int:
+  elif type(sel) is not str and not callable(sel):  #safelen(sel) > 0 and type(sel[0]) is int:
     selected = sel  # preserve order
   else:
     sel_fn = decode_atom_sel(sel)
     selected = [ii for ii, atom in enumerate(mol.atoms) if sel_fn is None or sel_fn(atom, mol, ii)]
-  return sorted(selected, key=lambda ii: sort(mol[ii], mol, ii)) if sort is not None else selected
+  return sorted(selected, key=lambda ii: sort(mol.atoms[ii], mol, ii)) if sort is not None else selected
+
+
+# when selecting from one residue, this is more efficient than looping over every atom as select_atoms() does
+def res_select(mol, res, atoms, squash=False):
+  """ select atoms with names in `atoms` (['A','B',...] or 'A,B,...') from residue `res` in Molecule `mol` """
+  atoms = [a.strip() for a in (atoms.split(',') if type(atoms) is str else atoms)]
+  res = mol.residues[res] if type(res) is int else res
+  hits = [next((ii for ii in res.atoms if mol.atoms[ii].name == a), None) for a in atoms]
+  return [h for h in hits if h is not None] if squash else hits
 
 
 # How might we support final box extents + total number of copies?
@@ -663,17 +659,32 @@ def center_of_mass(mol):
   return np.sum(weights[:,None]*mol.r, axis=0)/np.sum(weights)
 
 
-def calc_RMSD(mol1, mol2, atoms=None, grad=False):
-  """ Return RMS displacement (RMSD) between atoms of mol1 and atoms of mol2 and, if grad=True, gradient wrt
-    first set of coordinates
+def calc_RMSD(mol1, mol2, atoms=None, sort=None, align=False, grad=False):
+  """ Return RMS displacement (RMSD) between atoms specified by `atoms` of mol1 and mol2 and, if grad=True,
+    gradient wrt first set of coordinates
   """
-  # handle case of molecule objects
-  r1 = getattr(mol1, 'r', mol1)
+  r1 = getattr(mol1, 'r', mol1)  # handle case of molecule objects
   r2 = getattr(mol2, 'r', mol2)
-  dr = (r1 - r2) if atoms is None else (r1[atoms] - r2[atoms])
+  if atoms is not None:
+    r1 = r1[mol1.select(atoms, sort=sort)] if hasattr(mol1, 'select') else r1[atoms]
+    r2 = r2[mol2.select(atoms, sort=sort)] if hasattr(mol2, 'select') else r2[atoms]
+  if align:
+    r2 = align_atoms(r2, r1)
+  dr = r1 - r2
   natoms = np.size(dr)/3
   rmsd = np.sqrt(np.sum(dr*dr)/natoms)
   return (rmsd, dr/(natoms*rmsd)) if grad else rmsd
+
+
+def calc_RMSF(Rs):
+  """ RMS fluctuations of positions over trajectory Rs """
+  return np.sqrt(np.mean(np.sum( (Rs - np.mean(Rs, axis=0))**2, axis=2 ), axis=0))
+
+
+def unwrap_pbc(Rs, pbcbox):
+  """ remove position jumps due to periodic boundary conditions `pbcbox` from set of positions `Rs` """
+  dr = np.diff(Rs, axis=0)
+  return np.cumsum(np.concatenate([ [Rs[0]], dr - np.round(dr/pbcbox)*pbcbox ]), axis=0)
 
 
 def alignment_matrix(subject, ref, weights=1.0):
@@ -735,7 +746,8 @@ def align_mol(mol, ref, sel=None, sort='atom.resnum, atom.name'):
 
 
 # Usage: mol.set_bonds(guess_bonds(mol))
-def guess_bonds(r_array, z_array=None, tol=0.1):
+# NAMD/VMD uses 0.6*(sum of vdw radii); OpenBabel uses 0.45 + (sum of cov radii)
+def guess_bonds(r_array, z_array=None):  #, tol=0.1):
   """ return list of covalent bonds ((i,j), i < j) for atoms with positions r and atomic numbers z """
   from scipy.spatial.ckdtree import cKDTree
   if z_array is None:
@@ -745,8 +757,8 @@ def guess_bonds(r_array, z_array=None, tol=0.1):
   pairs = ck.query_pairs(5)
   bonds = []
   for i,j in pairs:
-    #rval = 1.3*(ELEMENTS[z_array[i]].cov_radius + ELEMENTS[z_array[j]].cov_radius) ... more standard
-    rval = tol + ELEMENTS[z_array[i]].cov_radius + ELEMENTS[z_array[j]].cov_radius
+    rval = 1.3*(ELEMENTS[z_array[i]].cov_radius + ELEMENTS[z_array[j]].cov_radius)
+    #rval = tol + ELEMENTS[z_array[i]].cov_radius + ELEMENTS[z_array[j]].cov_radius ... old way
     dr = r_array[i] - r_array[j]
     if np.dot(dr,dr) < rval*rval:
       bonds.append( (i, j) if i < j else (j, i) )

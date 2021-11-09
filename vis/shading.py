@@ -171,9 +171,9 @@ vec3 toon_shading(vec3 pos, vec3 normal, vec3 color)
 
 vec3 shading_fog(vec3 pos, vec3 color)
 {
-  // fog (depth cueing)
-  // fixed fn OpenGL provided linear, exponential, and e^2 fog
+  // fog (depth cueing); fixed fn OpenGL provided linear, exponential, and e^2 fog
   float fog_dist = -pos.z - fog_start;  // to match fixed fn OpenGL, set fog_start = 0 for exponential fog
+  //float fog_dist = distance(pos, pivot) - fog_start; if(fog < 0.01) discard;  // pivot=[0,0,dist(pos,pivot)]
   // standard exponential fog
   float fog = exp(-fog_dist * fog_density);
 
@@ -279,7 +279,10 @@ class LightingShaderModule:
 
   def on_key_press(self, viewer, keycode, key, mods):
     if key in 'FG':
-      if 'Ctrl' in mods:
+      if 'Alt' in mods:
+        self.fog_start_pivot = not self.fog_start_pivot
+        print("Fog start relative to %s" % ('pivot' if self.fog_start_pivot else 'camera'))
+      elif 'Ctrl' in mods:
         # decr fog_start with 'G' so that C and Ctrl+G both reduce visibility
         s = (1 if key == 'F' else -1) * (0.1 if 'Shift' in mods else 0.01)
         self.fog_start += s*(viewer.camera.z_far - viewer.camera.z_near)

@@ -4,12 +4,15 @@ import simtk.unit as UNIT
 from ..basics import *
 from ..molecule import Residue
 
+EUNIT = UNIT.kilojoule_per_mole*KJMOL_PER_HARTREE
+OPENMM_qqkscale = 332.06371335990205/(ANGSTROM_PER_BOHR*KCALMOL_PER_HARTREE)  # 1/(4*pi*eps0) in atomic units
 
 def openmm_top(mol):
   """ generate OpenMM topology from chem Molecule """
   assert len(mol.residues) > 0, "Residues required to created OpenMM topology"
   top = openmm_app.Topology()
-  chains = set(res.chain for res in mol.residues)
+  # preserve order of chains (Python 3.7+ - use OrderedDict for Python 2)
+  chains = list(dict.fromkeys(res.chain for res in mol.residues))  #set()
   topchn = {chain: top.addChain(chain) for chain in chains}
   topres = [top.addResidue(res.name, topchn[res.chain]) for res in mol.residues]
   topatm = [top.addAtom(a.name,
@@ -18,6 +21,8 @@ def openmm_top(mol):
     top.addBond(topatm[a1], topatm[a2])
   if mol.pbcbox is not None:
     top.setUnitCellDimensions(mol.pbcbox*UNIT.angstrom)  # Angstroms to nm
+  assert all(atop.element.atomic_number == amol.znuc for atop,amol in zip(top.atoms(), mol.atoms)), \
+      "OpenMM atom order does not match Molecule!"
   return top
 
 
@@ -74,46 +79,84 @@ def openmm_make_inactive(mol, sys, inactive):
         nbforce.addException(a1, a2, 0.0, 0.34, 0.0, replace=True)
 
 
-def openmm_load_params(mol, sys, charges=True, vdw=False):  #, charges=True, vdw=False, bonded=False):
-  nbforce = next(force for force in sys.getForces() if type(force) == openmm.NonbondedForce)
+# vdw works for AMBER but not CHARMM, which uses custom non-bonded force for LJ
+def openmm_load_params(mol, sys=None, ff=None, charges=True, vdw=False, bonded=False):
+  sys = ff.createSystem(openmm_top(mol), nonbondedMethod=openmm_app.NoCutoff) if sys is None else sys
+  forces = {f.__class__: f for f in sys.getForces()}
+  bndforce, angforce, torforce, nbforce = forces[openmm.HarmonicBondForce], \
+      forces[openmm.HarmonicAngleForce], forces[openmm.PeriodicTorsionForce], forces[openmm.NonbondedForce]
   for ii, atom in enumerate(mol.atoms):
     charge, sigma, eps = nbforce.getParticleParameters(ii)
     if charges:
-      atom.mmq = charge.value_in_unit(UNIT.elementary_charge)
+      atom.mmq = charge/UNIT.elementary_charge
     if vdw:
-      atom.lj_r0 = sigma.value_in_unit(UNIT.angstrom) * 2**(1/6.0)
-      atom.lj_eps = eps.value_in_unit(UNIT.kilojoule_per_mole)/KJMOL_PER_HARTREE
+      atom.lj_r0 = sigma/UNIT.angstrom * 2**(1/6.0)
+      atom.lj_eps = eps/EUNIT
+
+  if bonded:
+    mol.mm_stretch, mol.mm_bend, mol.mm_torsion, mol.mm_imptor = [], [], [], []
+    for ii in range(bndforce.getNumBonds()):
+      a1, a2, d, k = bndforce.getBondParameters(ii)
+      # openmm uses 0.5*k*(x-x0)^2 whereas we use k*(x-x0)^2 (as in the AMBER spec)
+      mol.mm_stretch.append(( [a1, a2], 0.5*k/(EUNIT/UNIT.angstrom**2), d/UNIT.angstrom ))
+    for ii in range(angforce.getNumAngles()):
+      a1, a2, a3, d, k = angforce.getAngleParameters(ii)
+      mol.mm_bend.append(( [a1, a2, a3], 0.5*k/(EUNIT/UNIT.radian**2), d/UNIT.radian ))
+    for ii in range(torforce.getNumTorsions()):
+      a1, a2, a3, a4, period, phase, k = torforce.getTorsionParameters(ii)
+      mol.mm_torsion.append(( [a1, a2, a3, a4], [ (k/EUNIT, phase/UNIT.radian, period) ] ))
+
+
+def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, **kwargs):
+  sysargs = dict(dict(nonbondedMethod=openmm_app.PME, constraints=openmm_app.HBonds), **kwargs)
+  system = ff.createSystem(openmm_top(mol), **sysargs)
+  if p0 is not None:
+    system.addForce(openmm.MonteCarloBarostat(p0*UNIT.bar, T0*UNIT.kelvin))
+  if intgr is None:
+    intgr = openmm.LangevinMiddleIntegrator(T0*UNIT.kelvin, 1/UNIT.picosecond, dt*UNIT.femtoseconds)
+  ctx = openmm.Context(system, intgr)
+  ctx.setPositions(mol.r*UNIT.angstrom)
+  ctx.setVelocitiesToTemperature(T0*UNIT.kelvin)
+  if mol.pbcbox is not None:
+    ctx.setPeriodicBoxVectors(*[v*UNIT.angstrom for v in np.diag(mol.pbcbox)])
+  return ctx
 
 
 # for tracking down "Particle coordinate is nan" error
-def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False):
+def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vis=None):
   """ Run OpenMM context `ctx` for `nsteps` and return position, energy, and, optionally, gradient recorded
     every sampsteps
   """
-  sys, intgr = ctx.getSystem(), ctx.getIntegrator()
+  intgr = ctx.getIntegrator()  #sys = ctx.getSystem()
   Es, Rs, Gs = [], [], []
+  nsteps, sampsteps = int(nsteps), int(sampsteps)  # so user can pass, e.g. 1E6 (which is a float)
   try:
     for ii in range(nsteps//sampsteps):
       intgr.step(sampsteps)
       state = ctx.getState(getEnergy=True, getPositions=True, getForces=grad, enforcePeriodicBox=True)
-      Es.append(state.getPotentialEnergy().value_in_unit(UNIT.kilojoule_per_mole)/KJMOL_PER_HARTREE)
-      Rs.append(state.getPositions(asNumpy=True).value_in_unit(UNIT.angstrom))
+      Es.append(state.getPotentialEnergy()/EUNIT)
+      #Es[-1] += state.getKineticEnergy()/EUNIT
+      Rs.append(state.getPositions(asNumpy=True)/UNIT.angstrom)
       if grad:
-        Gs.append(-state.getForces(asNumpy=True).value_in_unit(UNIT.kilojoule_per_mole/UNIT.angstrom)/KJMOL_PER_HARTREE)
-  except Exception as e:
-    print("OpenMM exception: ", e)
+        Gs.append(-state.getForces(asNumpy=True)/(EUNIT/UNIT.angstrom))
+      if vis:
+        vis.refresh(r=Rs[-1], repaint=True)
+  except (KeyboardInterrupt, Exception) as e:
+    print("openmm_dynamic terminated by exception: ", e)
   return (np.asarray(Rs), np.asarray(Es), np.asarray(Gs)) if grad else (np.asarray(Rs), np.asarray(Es))
 
 
 # OpenMM doesn't support Hessian calculations; see github.com/leeping/forcebalance/blob/master/src/openmmio.py
 #  for Hessian calc via finite differencing; also see github.com/Hong-Rui/Normal_Mode_Analysis
 
-def openmm_EandG_context(mol, ff=None, inactive=None, charges=None):
+def openmm_EandG_context(mol, ff=None, inactive=None, charges=None, **kwargs):
   """ create an OpenMM context for single point energy and gradient calculations """
-  top = openmm_top(mol)  #noconnect=noconnect
+  sysargs = dict(dict(nonbondedMethod=openmm_app.NoCutoff), **kwargs)
   ff = openmm_app.ForceField('amber99sb.xml', 'tip3p.xml') if ff is None else ff
-  sys = ff.createSystem(top, nonbondedMethod=openmm_app.NoCutoff)
-  openmm_load_params(mol, sys)  # should we do this after overriding charges?
+  sys = ff.createSystem(openmm_top(mol), **sysargs)
+  for ii,f in enumerate(sys.getForces()):
+    f.setForceGroup(ii)
+  #openmm_load_params(mol, sys)  # should we do this after overriding charges?
   if inactive is not None:
     openmm_make_inactive(mol, sys, inactive)
   if charges is not None:
@@ -131,11 +174,16 @@ def openmm_EandG(mol, r=None, ff=None, ctx=None, inactive=None, charges=None, gr
     ctx = openmm_EandG_context(mol, ff, inactive, charges)
   else:
     assert ff is None and inactive is None and charges is None, "Cannot specify ff, inactive, or charges w/ ctx"
-  ctx.setPositions((mol.r if r is None else r)*UNIT.angstrom)
-  state = ctx.getState(getEnergy=True, getForces=True)
-  E = state.getPotentialEnergy().value_in_unit(UNIT.kilojoule_per_mole)/KJMOL_PER_HARTREE
-  gunit = UNIT.kilojoule_per_mole/UNIT.angstrom
-  G = -state.getForces(asNumpy=True).value_in_unit(gunit)/KJMOL_PER_HARTREE if grad else None
+  ctx.setPositions((getattr(mol, 'r', mol) if r is None else r)*UNIT.angstrom)
+  if components is not None:
+    for ii,f in enumerate(ctx.getSystem().getForces()):
+      state = ctx.getState(getEnergy=True, getForces=grad, groups=set([ii]))
+      components['E_' + f.__class__.__name__] = state.getPotentialEnergy()/EUNIT
+      if grad:
+        components['G_' + f.__class__.__name__] = -state.getForces(asNumpy=True)/(EUNIT/UNIT.angstrom)
+  state = ctx.getState(getEnergy=True, getForces=grad)
+  E = state.getPotentialEnergy()/EUNIT
+  G = -state.getForces(asNumpy=True)/(EUNIT/UNIT.angstrom) if grad else None
   return E, G
 
 
@@ -144,10 +192,10 @@ class OpenMM_EandG:
     self.ctx = openmm_EandG_context(mol, ff, inactive, charges)
     self.inactive, self.charges = inactive, charges
 
-  def __call__(self, mol, r=None, inactive=None, charges=None, components=None):
+  def __call__(self, mol, r=None, inactive=None, charges=None, grad=True, components=None):
     if inactive is not None or charges is not None:
       assert inactive == self.inactive and charges == self.charges, "charges and inactive cannot be changed!"
-    return openmm_EandG(mol, r, ctx=self.ctx, components=components)
+    return openmm_EandG(mol, r, ctx=self.ctx, grad=grad, components=components)
 
 
 # replace nonbonded force of OpenMM system with custom nonbonded force for alchemical transformation

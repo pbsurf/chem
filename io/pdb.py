@@ -14,7 +14,7 @@ from __future__ import absolute_import  # so that import pdb chooses global
 import numpy as np
 import os, subprocess, copy
 
-from ..basics import setattrs
+from ..basics import setattrs, read_file
 from ..molecule import Atom, Residue, Molecule, guess_bonds, get_header
 from ..data.elements import ELEMENTS
 from ..data.pdb_bonds import *
@@ -71,34 +71,8 @@ def fix_tinker_pdb(mol):
   sulfurs = [ii for ii, atom in mol.enumatoms() if atom.znuc == 16]
   if len(sulfurs) > 1:
     disulfides = guess_bonds(mol.r[sulfurs], mol.znuc[sulfurs])
-    mol.set_bonds([(sulfurs[i], sulfurs[j]) for i,j in disulfides], replace=False)
+    mol.add_bonds([(sulfurs[i], sulfurs[j]) for i,j in disulfides])
   return mol
-
-
-# Openbabel add hydrogens option is a disaster - doesn't use correct name and creates CONECT records
-#~ TINKER_RESIDUES = PDB_BONDS.keys()  # this probably isn't quite right
-#~ def copy_hydrogens(mol, hmol):
-#~   """ Copy hydrogens present on standard residues in `hmol` but not `mol` to `mol`; returns `mol` """
-#~   # we assume protein chains are in same order, but accept interleaved HETATM chains
-#~   ii,jj = 0,0
-#~   while ii < len(mol.residues) and jj < len(hmol.residues):
-#~     while ii < len(mol.residues) and mol.residues[ii].name not in TINKER_RESIDUES:
-#~       ii += 1
-#~     #if hmol.residues[jj].name.startswith('TER '): jj += 1
-#~     res, hres = mol.residues[ii], hmol.residues[jj]
-#~     if res.name != hres.name:
-#~       print("Warning: residue %d (%s) from PDB file does not match residue %d (%s) from hydrogens PDB file"
-#~           % (res.pdb_num, res.name, hres.pdb_num, hres.name))
-#~       # it is possible that mismatch occured due to a HETATM amino acid residue, e.g. 1PQ5, so try skipping it
-#~       ii += 1
-#~       continue
-#~     known_atoms = [mol.atoms[kk].name for kk in res.atoms]
-#~     new_atoms = [hmol.atoms[kk] for kk in hres.atoms if hmol.atoms[kk].name not in known_atoms]
-#~     res.atoms.extend(range(len(mol.atoms), len(mol.atoms) + len(new_atoms)))
-#~     mol.atoms.extend([Atom(a.name, a.znuc, a.r, resnum=ii) for a in new_atoms])
-#~     ii += 1
-#~     jj += 1
-#~   return mol
 
 
 def copy_residues(mol, mol_pdb):
@@ -138,43 +112,21 @@ def copy_residues(mol, mol_pdb):
 #  and remove these atoms when parsing is complete
 RES_RENAME = dict(CYX='CYS', HID='HIS', HIE='HIS')
 
-def parse_pdb(PDB, fix_tinker=True, hydrogens=False, alt_loc='A'):
-  """ PDB data read from file or string (assumed if contains \n).
-    Problems with Tinker generated PDB files fixed if `fix_tinker` is true.  If `hydrogens` is true, Tinker
-    will be used to add any missing hydrogens to standard residues.  `hydrogens` can also be a string (or a
-    fn taking PDB filename and returning a string) to be passed to load_molecule() or a list of Molecules;
-    returned Molecule will actually be from hydrogens, with PDB file used to add residues
-    Returns Molecule object or, if PDB data contains multiple models, list of Molecule objects
+def parse_pdb(PDB, fix_tinker=True, bonds=True, alt_loc='A', bfactors=False):
+  """ PDB data read from file or string (assumed if contains \n). Problems with Tinker generated PDB files
+    fixed if `fix_tinker` is true.  Returns Molecule object or, if PDB data contains multiple models, list of
+    Molecule objects
   """
-  TINKER_FF = "$TINKER_PATH/../params/oplsaa.prm"
-  # load hydrogens PDB first
-  hydrogens = hydrogens(PDB) if callable(hydrogens) else hydrogens
-  if type(hydrogens) is str:
-    from . import load_molecule
-    hydrogens = load_molecule(hydrogens)
-  elif hydrogens is True:
-    if '\n' in PDB:
-      with open("_chem.pdb", 'w') as f:
-        f.write(PDB)
-    else:
-      subprocess.check_call(["ln", "-s", PDB, "_chem.pdb"])
-    subprocess.check_call("echo parameters %s > _chem.key && $TINKER_PATH/pdbxyz _chem.pdb ALL ALL"
-        % TINKER_FF, shell=True)
-    hydrogens = parse_xyz("_chem.xyz")
-    subprocess.check_call(["rm", "_chem.key", "_chem.pdb", "_chem.xyz", "_chem.seq"])
-  # ensure hydrogens is a list
-  hydrogens = [hydrogens] if isinstance(hydrogens, Molecule) else hydrogens
-
   is_tinker = True
   last_res_id, last_chain_id, chain_id = '0 ','',''
   mols = []
   mol = Molecule()
-  lines = PDB.splitlines() if '\n' in PDB else open(PDB, 'r')
+  lines = PDB.splitlines() if '\n' in PDB else read_file(PDB).splitlines()
   for line in lines:
     if line.startswith('ENDMDL') or (line.strip() == 'END' and len(mol.atoms) > 0):
       mol = mol.remove_atoms([ii for ii,a in mol.enumatoms() if a.znuc == 0])
       mol = fix_tinker_pdb(mol) if is_tinker and fix_tinker else mol
-      mols.append(copy_residues(hydrogens[len(mols)], mol) if hydrogens else apply_pdb_bonds(mol))
+      mols.append(apply_pdb_bonds(mol) if bonds else mol)  #copy_residues(hydrogens[len(mols)], mol) if hydrogens
       mol = Molecule()
     elif line.startswith('HETATM') or line.startswith('ATOM'):
       # alternate location id - for now, require user to specify which alt_loc to use
@@ -221,7 +173,7 @@ def parse_pdb(PDB, fix_tinker=True, hydrogens=False, alt_loc='A'):
       atom.r = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
       #atom.occupancy = float(line[54:60].strip() or 100)
       b_factor = line[60:66].strip()
-      if b_factor:
+      if bfactors and b_factor:
         atom.b_factor = float(b_factor)
       #at.segi = line[72:76].strip()
       atom.mmconnect = []
@@ -255,9 +207,6 @@ def parse_pdb(PDB, fix_tinker=True, hydrogens=False, alt_loc='A'):
       is_tinker = False
     elif line.startswith('SEQRES') or line.startswith('REMARK'):
       is_tinker = False
-
-  if type(lines) is file:
-    lines.close()
 
   return mols if len(mols) > 1 else mols[0]
 

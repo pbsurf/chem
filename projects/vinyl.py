@@ -2,20 +2,20 @@
 
 import os
 import scipy.optimize
+from pyscf import scf
 from chem.molecule import *
 from chem.io import *
 from chem.qmmm.qmmm1 import *
 from chem.opt.dlc import *
 from chem.opt.lbfgs import *
 from chem.opt.optimize import *
-from pyscf import scf
 from chem.vis.chemvis import *
 from chem.test.common import *
 from chem.theo import *
 from chem.opt.dimer import *
 from chem.opt.neb import *
 from chem.mm import MolLJ, NCMM
-
+from chem.data.test_molecules import ch3cho_xyz, ch2choh_xyz
 
 # Refs:
 # - en.wikipedia.org/wiki/Vinyl_alcohol : dH = -42.7 kJ/mol = -10.2 kcal/mol (experimental)
@@ -26,30 +26,9 @@ from chem.mm import MolLJ, NCMM
 # - 10.1002/(SICI)1097-461X(1998)66:1<9::AID-QUA2>3.0.CO;2-Z - CH2CHOH/CH3CHO and CH2CHNH2/CH3CHNH
 # - aanda.org/articles/aa/pdf/2020/03/aa37302-19.pdf (10.1051/0004-6361/201937302) - refs
 
-# these are both MM3 optimized
-ch3cho_xyz = ("7  CH3CHO w/ Amber96 Tinker types, GAFF names  \n"   # MM3 types:
-" 1  c     0.216434   -0.239836    0.022589    342  2  3  7   \n"   # 3
-" 2  c3    0.041247   -0.042250    1.496848    340  1  4  5  6\n"   # 1
-" 3  o     1.273466   -0.143112   -0.555929    343  1         \n"   # 7
-" 4  hc   -0.670708    0.790679    1.698814    341  2         \n"   # 5
-" 5  hc   -0.360705   -0.966829    1.971194    341  2         \n"   # 5
-" 6  hc    1.009413    0.204927    1.989829    341  2         \n"   # 5
-" 7  ha   -0.702574   -0.492745   -0.564006    341  1         \n")  # 5
-
-ch2choh_xyz = ("7  CH2CHOH w/ Amber96 Tinker types, GAFF names\n"    # MM3 types:
-" 1  c2    0.231311   -0.117468    0.202122    342  2  3  7   \n"    #  2
-" 2  c2   -0.336100   -0.188389    1.410112    340  1  4  5   \n"    #  2
-" 3  oh    1.465427   -0.622004   -0.056621    343  1  6      \n"    #  6
-" 4  ha   -1.343088    0.222649    1.588799    341  2         \n"    #  5
-" 5  ha    0.192087   -0.661201    2.253726    341  2         \n"    #  5
-" 6  ho    1.994120    0.037261   -0.538351    341  3         \n"    # 73
-" 7  ha   -0.308197    0.346592   -0.641855    341  1         \n")   #  5
-
-tinker_key = make_tinker_key('amber96')
-
-
 ch3cho = load_molecule(ch3cho_xyz)  #Molecule().append_atoms(load_molecule(ch3cho_xyz), residue='LIG')
 ch2choh = load_molecule(ch2choh_xyz)
+tinker_key = make_tinker_key('amber96')
 
 qmbasis = '6-31G*' #'6-31++G**'
 ligatoms = init_qmatoms(ch3cho, '*', qmbasis)
@@ -457,33 +436,8 @@ G0 = 1E-4*np.array([1,1,1, 0.2,0.2,0.2])  # bigger steps for rotation
 mcoptim = MCoptim()
 Es, Rs = mcoptim(NCMM(cov1), cov1.r, coords=rgds, G0=G0, hop=True, adjstep=10, maxiter=400) #, hopcoords=dlc, hopargs=dict(gtol=2E-04, ftol=5E-07, maxiter=20), G0=2E-5, adjstep=4, maxiter=40)
 
-
-# hierarchical clustering
-# - seems to work well; any reason to consider alterative approaches?
-# - e.g., for each conformation, compare RMSD to accepted conformations and discard if close to one of them,
-#  otherwise add to accepted conformations
-# - density based clustering (DBSCAN, OPTICS) seems to be the current state-of-the-art; see scikit-learn.org
-from scipy.spatial.distance import squareform
-from scipy.cluster.hierarchy import linkage, fcluster
-
-# calc pairwise RMSD matrix
-ligRs = Rs[:, rslig, :]
-dRs = ligRs[:,None,:,:] - ligRs[None,:,:,:]
-Ds = np.sqrt(np.einsum('iljk->il', dRs**2)/dRs.shape[-2])
-# perform clustering; squareform converts between square distance matrix and condensed distance matrix
-Z = linkage(squareform(Ds), method='single')
-clust = fcluster(Z, 0.9, criterion='distance')  # also possible to specify number of clusters instead
-# pick lowest energy geometry as representative of each cluster
-MCr, MCe = [], []
-for ii in np.unique(clust):
-  sel = clust == ii
-  MCe.append(np.amin(Es[sel]))
-  MCr.append(Rs[sel][np.argmin(Es[sel])])
-esort = np.argsort(MCe)
-MCe = [MCe[ii] for ii in esort]
-MCr = [MCr[ii] for ii in esort]
-
-
+# clustering
+MCe, MCr = cluster_poses(Es, Rs, thresh=0.9)
 
 
 
@@ -1149,7 +1103,7 @@ else:
 from zipfile import ZipFile
 if os.path.exists('theos0.zip'):
   with ZipFile('theos0.zip', 'r') as zip:
-    theos = [load_molecule(zip.read(f)) for f in zip.namelist()]
+    theos = [load_molecule(zip.read(f).decode('utf-8')) for f in zip.namelist()]
 else:
   charges = sorted(charges, key=lambda c: c.qmq)
   r_com = center_of_mass(ch3cho)

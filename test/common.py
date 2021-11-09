@@ -55,6 +55,6 @@ def hess_sanity(fn, r, scale=0.1, steps=4):
     E1,G1,H1 = fn(r, hess=True)
     E2,G2,H2 = fn(r+dr, hess=True)
     print("dE expect: %f (%f); dE actual: %f" % (np.vdot(G1, dr), np.vdot(G2, dr), E2 - E1))
-    print G2 - G1
-    print np.einsum('ijkl,jl->ik', H1, dr)
+    print(G2 - G1)
+    print(np.einsum('ijkl,jl->ik', H1, dr))
     scale *= 0.1

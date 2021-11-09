@@ -8,7 +8,7 @@ from .molecule import *
 # also see: github.com/dspoel/Toy-MD
 
 # hard cutoff should never actually be used!
-def coulomb(rq, mq, mask=None, mask14=None, scale14=1.0, kscale=1.0, pbcbox=None, cutoff=None, hess=False):
+def coulomb(rq, mq, mask=None, mask14=None, scale14=1.0, kscale=1.0, pbcbox=None, cutoff=None, hess=False, pairsout=None):
   """ return charge-charge energy, gradient, and Hessian (if hess=True) for charges `mq` at positions `rq`,
     excluding interaction between pairs listed in `mask`, and scaling interaction between pairs in `mask14`
     by `scale14`; coulomb constant is scaled by `kscale` (to accommodate force fields using different values)
@@ -30,9 +30,11 @@ def coulomb(rq, mq, mask=None, mask14=None, scale14=1.0, kscale=1.0, pbcbox=None
   if mask14 is not None and scale14 != 1.0:
     qq[mask14[:,0], mask14[:,1]] *= scale14
     qq[mask14[:,1], mask14[:,0]] *= scale14
-  # E and G
-  Eqq = 0.5*Ke*np.sum(qq*invdd)  # OMG YOU HAD THE WRONG SIGN
+  # E and G ... you had the wrong sign here!!!
+  Eqq = 0.5*Ke*np.sum(qq*invdd)
   Gqq = -Ke*np.sum((qq*(invdd**3))[:,:,None]*dr, axis=1)
+  if pairsout is not None:
+    pairsout['Eqq'], pairsout['Gqq'] = Ke*qq*invdd, -Ke*(qq*(invdd**3))[:,:,None]*dr
   if not hess:
     return Eqq, Gqq
   # Hessian
@@ -47,7 +49,7 @@ def coulomb(rq, mq, mask=None, mask14=None, scale14=1.0, kscale=1.0, pbcbox=None
 
 
 # see QMMM.qm_EandG()
-def lj_EandG(r, r0, depth, mask=None, mask14=None, scale14=1.0, pbcbox=None, cutoff=None, repel=None, hess=False):
+def lj_EandG(r, r0, depth, mask=None, mask14=None, scale14=1.0, pbcbox=None, cutoff=None, repel=None, hess=False, pairsout=None):
   """ return Lennard-Jones 6-12 van der Waal energy, gradient, and Hessian (if hess=True) for atoms at
     positions `r` with LJ parameters `r0` (equilib dist) and `depth` (\eps_0), excluding interaction between
     pairs listed in `mask`, and scaling interaction between pairs in `mask14` by `scale14`; only repulsive
@@ -84,6 +86,9 @@ def lj_EandG(r, r0, depth, mask=None, mask14=None, scale14=1.0, pbcbox=None, cut
   Elj = 0.5*np.sum(depth*(lj6*lj6 - 2*repelmask*lj6))
   Glj = -12.0*np.sum((depth*(lj6*lj6 - repelmask*lj6)*idr2)[:,:,None]*dr, axis=1)
   #-12.0*np.einsum('ij,ijk->ik', depth*(lj6*lj6 - repelmask*lj6)*idr2, dr)
+  if pairsout is not None:
+    pairsout['Evdw'] = depth*(lj6*lj6 - 2*repelmask*lj6)
+    pairsout['Gvdw'] = -12.0*(depth*(lj6*lj6 - repelmask*lj6)*idr2)[:,:,None]*dr
   if not hess:
     return Elj, Glj
   # Hessian
@@ -151,10 +156,9 @@ class NCMM:
     mask = self.mask if inactive is None else np.vstack(
         (self.mask, [(ii,jj) for ii in inactive for jj in inactive if jj > ii]) )
     Eqq, Gqq = coulomb(r, q, mask=mask, mask14=self.mask14, scale14=self.qqscale14,
-        kscale=self.qqkscale, pbcbox=pbcbox, cutoff=self.cutoff) if self.qq else (0,0)
-    Elj, Glj = lj_EandG(r, self.r0, self.depth, mask=mask,
-        mask14=self.mask14, scale14=self.ljscale14, pbcbox=pbcbox, cutoff=self.cutoff) if self.lj else (0,0)
-    if components is not None: components.update(Eqq=Eqq, Evdw=Elj)
+        kscale=self.qqkscale, pbcbox=pbcbox, cutoff=self.cutoff, pairsout=components) if self.qq else (0,0)
+    Elj, Glj = lj_EandG(r, self.r0, self.depth, mask=mask, mask14=self.mask14,
+        scale14=self.ljscale14, pbcbox=pbcbox, cutoff=self.cutoff, pairsout=components) if self.lj else (0,0)
     return Eqq + Elj, Gqq + Glj
 
 
@@ -164,26 +168,34 @@ def mmbonded(mol, r=None, inactive=None, components=None):
   inactive = frozenset(inactive) if inactive is not None else None
   Ebond, Eangle, Etors, Eimptor = 0,0,0,0
   G = np.zeros_like(r)
+  if components is not None:
+    components.update(Ebond=[], Eangle=[], Etors=[], Eimptor=[])
 
   # mm_bonds: [ ([atom1, atom2], spring constant, equilb length), ... ]
   for b in mol.mm_stretch:
     if not (inactive and all(a in inactive for a in b[0])):
       d, gd = calc_dist(r[b[0]], grad=True)
-      Ebond += b[1]*(d - b[2])**2
+      eb = b[1]*(d - b[2])**2
+      if components is not None: components['Ebond'].append(eb)
+      Ebond += eb
       G[b[0]] += 2*b[1]*(d - b[2])*gd
 
   # mm_angles: [ ([atom1, atom2, atom3], spring constant, equilb angle), ... ]
   for b in mol.mm_bend:
     if not (inactive and all(a in inactive for a in b[0])):
       a, ga = calc_angle(r[b[0]], grad=True)
-      Eangle += b[1]*(a - b[2])**2
+      eb = b[1]*(a - b[2])**2
+      if components is not None: components['Eangle'].append(eb)
+      Eangle += eb
       G[b[0]] += 2*b[1]*(a - b[2])*ga
 
   # mm_torsions: [ ([atom1, atom2, atom3, atom4], [(amplitude, phase, periodicity), ...]), ... ]
   for b in mol.mm_torsion:
     if not (inactive and all(a in inactive for a in b[0])):
       a, ga = calc_dihedral(r[b[0]], grad=True)
-      Etors += sum(c[0]*(1 + np.cos(c[2]*a - c[1])) for c in b[1])
+      eb = sum(c[0]*(1 + np.cos(c[2]*a - c[1])) for c in b[1])
+      if components is not None: components['Etors'].append(eb)
+      Etors += eb
       for c in b[1]:
         G[b[0]] += -c[0]*np.sin(c[2]*a - c[1])*c[2]*ga
 
@@ -191,12 +203,12 @@ def mmbonded(mol, r=None, inactive=None, components=None):
   for b in mol.mm_imptor:
     if not (inactive and all(a in inactive for a in b[0])):
       a, ga = calc_dihedral(r[b[0]], grad=True)
-      Eimptor += sum(c[0]*(1 + np.cos(c[2]*a - c[1])) for c in b[1])
+      eb = sum(c[0]*(1 + np.cos(c[2]*a - c[1])) for c in b[1])
+      if components is not None: components['Eimptor'].append(eb)
+      Eimptor += eb
       for c in b[1]:
         G[b[0]] += -c[0]*np.sin(c[2]*a - c[1])*c[2]*ga
 
-  if components is not None:
-    components.update(Ebond=Ebond, Eangle=Eangle, Etors=Etors, Eimptor=Eimptor)
   return Ebond + Eangle + Etors + Eimptor, G
 
 
@@ -208,8 +220,8 @@ class SimpleMM:
     self.ncmm = ncmm if ncmm is not None else NCMM(mol)
     self.mol = mol
 
-  def __call__(self, mol, r=None, inactive=None, charges=None, components=None):
-    if r is not None:
+  def __call__(self, mol=None, r=None, inactive=None, charges=None, components=None):
+    if hasattr(mol, 'atoms'):  #r is not None:
       assert id(mol) == id(self.mol), "SimpleMM can only be used with self.mol"
     r = mol if r is None else r
     Enc, Gnc = self.ncmm(self.mol, r, inactive, charges, components)
@@ -370,9 +382,28 @@ def lj_atom(idx, r, r0, depth):
 # AMBER parameter (dat) file notes:
 # - multiple torsion terms get separate lines (negative value of periodicity for all but the last)
 # - ref: https://github.com/ParmEd/ParmEd/blob/master/parmed/amber/parameters.py
+# previously, we messed w/ the case of atom names here ... instead, mess with atom name/mmtype as needed
+
+def _download_amber_data():
+  # ff99SB.xml differs from amber99sb.xml in that charges are set in residue defs instead of defining a unique
+  #  atom type for every atom, so it more closely matches structure of AMBER param files
+  #os.system("wget https://github.com/openmm/openmmforcefields/blob/master/amber/ffxml/ff99SB.xml")
+  os.chdir(DATA_PATH)
+  os.system("wget https://github.com/openmm/openmmforcefields/tree/master/amber/gaff/ffxml/gaff.xml")
+  os.system("mkdir amber")
+  os.chdir(DATA_PATH + "/amber")
+  os.system("wget https://github.com/choderalab/ambermini/raw/master/share/amber/dat/reslib/leap/all_amino94.lib")
+  os.system("wget https://github.com/choderalab/ambermini/raw/master/share/amber/dat/reslib/leap/all_aminont94.lib")
+  os.system("wget https://github.com/choderalab/ambermini/raw/master/share/amber/dat/reslib/leap/all_aminoct94.lib")
+  os.system("wget https://github.com/choderalab/ambermini/raw/master/share/amber/dat/leap/parm/parm99.dat")
+  os.system("wget https://github.com/choderalab/ambermini/raw/master/share/amber/dat/leap/parm/frcmod.ff99SB")
+  os.system("wget https://github.com/choderalab/ambermini/raw/master/share/amber/dat/leap/parm/gaff.dat")
+  # or https://github.com/openmm/openmmforcefields/raw/master/amber/gaff/dat/gaff-1.81.dat
+
+
 def load_amber_dat(filename):
   """ load AMBER parameter *.dat file """
-  smash = lambda s: s.replace(' ', '').upper()
+  smash = lambda s: s.replace(' ', '')
   parm = Bunch(stretch={}, bend={}, torsion={}, imptor={}, vdw={})
   vdw_equiv = {}
   with open(filename, 'r') as file:
@@ -382,14 +413,14 @@ def load_amber_dat(filename):
     for line in file:
       a = line[5:].split()
       if not a: break
-      parm.stretch[smash(line[:5])] = a[:2]
+      parm.stretch[smash(line[:5])] = a[:2]  # kcal/mol/Ang^2 ; Ang
     for line in file:
       a = line[8:].split()
       if not a: break
-      parm.bend[smash(line[:8])] = a[:2]
+      parm.bend[smash(line[:8])] = a[:2]  # kcal/mol/rad^2 ; degrees
     for line in file:
       a = line[11:].split()
-      if not a: break
+      if not a: break  # divisor (int) ; kcal/mol ; phase (deg) ; multiplicity (int)
       parm.torsion.setdefault(smash(line[:11]), []).append(a[:4])
     for line in file:
       a = line[11:].split()
@@ -405,16 +436,16 @@ def load_amber_dat(filename):
     for line in file:
       a = line.split()
       if not a: break
-      parm.vdw[a[0].upper()] = a[1:3]
+      parm.vdw[a[0]] = a[1:3]  # Ang ; kcal/mol
       for eqv in vdw_equiv.get(a[0], []):
-        parm.vdw[eqv.upper()] = a[1:3]
+        parm.vdw[eqv] = a[1:3]
 
   return parm
 
 
 def load_amber_frcmod(filename):
   """ load AMBER parameter frcmod.* file """
-  smash = lambda s: s.replace(' ', '').upper()
+  smash = lambda s: s.replace(' ', '')
   parm = Bunch(stretch={}, bend={}, torsion={}, imptor={}, vdw={})
   with open(filename, 'r') as file:
     for line in file:
@@ -455,25 +486,67 @@ def load_amber_frcmod(filename):
   return parm
 
 
-def set_mm_params(mol, parm, mmtype0=801):
-  """ load MM params for a molecule `mol` from Amber parameters `parm` and assign sequential mmtypes starting
-    from `mmtype0` (default 801); must be <1000 and, for AMBER, >648
-  """
+def load_amber_reslib(*files):
+  """ load residue data from AMBER reslib files """
+  reslib = {}
+  currres = None
+  for filename in files:
+    with open(filename, 'r') as file:
+      for line in file:
+        if line.startswith("!entry."):
+          l = line.split('.', 2)
+          if l[2].startswith("unit.atoms table"):
+            currres = reslib.setdefault(l[1], {})
+          else:
+            currres = None
+        elif currres is not None:
+          l = line.split()
+          currres[l[0][1:-1]] = ( l[1][1:-1], float(l[-1]) )  # name, atom type, charge
+  return reslib
+
+
+def residue_terminal(mol, resnum):
+  """ return 'N' if residue `resnum` is N-terminal, 'C' if C-terminal, 'NC' if lone, '' otherwise """
+  res = mol.residues[resnum]
+  if res.name not in PDB_PROTEIN:
+    return ''
+  term = ''
+  prevres = mol.residues[resnum-1] if resnum > 0 else None
+  if prevres is None or prevres.chain != res.chain or prevres.name not in PDB_PROTEIN:
+    term += 'N'
+  nextres = mol.residues[resnum+1] if resnum+1 < len(mol.residues) else None
+  if nextres is None or nextres.chain != res.chain or nextres.name not in PDB_PROTEIN:
+    term += 'C'
+  return term
+
+
+# we no longer assign numeric mmtypes for Tinker ... as easy as mol.mmtype = np.arange(mol.natoms) + mmtype0
+#  - mmtype0 must be <1000 (Tinker has maxclass=1000 by default) and, for AMBER, >648
+def set_mm_params(mol, parm, reslib=None):
+  """ load MM params for a molecule `mol` from Amber parameters `parm` """
   UNIT = 1.0/KCALMOL_PER_HARTREE
   getparm = lambda p, a: p.get('-'.join(a), None) or p.get('-'.join(a[::-1]), None)
   mol.mm_stretch, mol.mm_bend, mol.mm_torsion, mol.mm_imptor = [], [], [], []
-  bonds, angles,diheds = mol.get_internals()
-  mmtypes = np.array([a.name.upper() for a in mol.atoms])
+  bonds, angles, diheds = mol.get_internals()
+  # charge and mmtype from reslib
+  if reslib is not None:
+    for ii,res in enumerate(mol.residues):
+      resdat = reslib[residue_terminal(mol, ii) + res.name]
+      for jj in res.atoms:
+        mol.atoms[jj].mmtype, mol.atoms[jj].mmq = resdat[mol.atoms[jj].name]
+  mmtypes = mol.mmtype  #np.array([a.name.upper() for a in mol.atoms])
   for b in bonds:
     p = getparm(parm.stretch, mmtypes[list(b)])
-    mol.mm_stretch.append(( b, float(p[0])*UNIT, float(p[1]) ))
+    mol.mm_stretch.append(( list(b), float(p[0])*UNIT, float(p[1]) ))
   for b in angles:
     p = getparm(parm.bend, mmtypes[list(b)])
-    mol.mm_bend.append(( b, float(p[0])*UNIT, float(p[1])*np.pi/180 ))
+    mol.mm_bend.append(( list(b), float(p[0])*UNIT, float(p[1])*np.pi/180 ))
   for b in diheds:
     ps = getparm(parm.torsion, mmtypes[list(b)]) or getparm(parm.torsion, ['X', mmtypes[b[1]], mmtypes[b[2]], 'X'])
     # when comparing, note that Tinker amber*.prm torsions are already divided by the p[0] value
-    mol.mm_torsion.append(( b, [(float(p[1])/float(p[0])*UNIT, float(p[2])*np.pi/180, abs(float(p[3]))) for p in ps] ))
+    l = [( float(p[1])/float(p[0])*UNIT, float(p[2])*np.pi/180, abs(float(p[3])) ) for p in ps if float(p[1]) != 0.0]
+    if l:
+      mol.mm_torsion.append((list(b), l))
   # can't iterate over imptors from generate_internals() - need to choose the most specific term for each atom
   # ref: Tinker kimptor.f
   impparm = lambda nx, z: parm.imptor.get('-'.join(['X']*nx + [mmtypes[y] for y in z[nx:]]), None)
@@ -487,38 +560,12 @@ def set_mm_params(mol, parm, mmtype0=801):
       hits = [(z,p) for z,p in zip(w, res) if p is not None]
       for z,p in hits:
         #print("imptor = %r, abcd = %s, x = %s, nhits = %d" % (z, '-'.join(mmtypes[z]), '-'.join(['X']*numx + [mmtypes[y] for y in z[numx:]]), len(hits)))
-        mol.mm_imptor.append(( tuple(z), [(float(p[0])*UNIT/len(hits), float(p[1])*np.pi/180, abs(float(p[2])))] ))
+        mol.mm_imptor.append(( list(z), [(float(p[0])*UNIT/len(hits), float(p[1])*np.pi/180, abs(float(p[2])))] ))
       if hits: break
-  # vdW and mmtype
+  # vdW
   for ii,a in enumerate(mol.atoms):
     p = parm.vdw.get(mmtypes[ii], None)
     a.lj_r0 = 2.0*float(p[0])
     a.lj_eps = float(p[1])*UNIT
-    a.mmtype = mmtype0 + ii  # set MM type ... Tinker has maxclass=1000 by default, so must be less than 1000
 
   return mol
-
-
-def write_mm_params(mol):
-  """ serialize MM params in Tinker format """
-  UNIT = 1.0/KCALMOL_PER_HARTREE
-  ids = lambda b: tuple(mol.atoms[a].mmtype for a in b)
-  s = []
-  for ii,a in enumerate(mol.atoms):
-    s.append('atom %d %d %s "GAFF atom" %d %.3f %d' %
-        (a.mmtype, a.mmtype, a.name, a.znuc, ELEMENTS[a.znuc].mass, len(a.mmconnect)))  # mm class = mm type
-  for p in mol.mm_stretch:
-    s.append("bond %d %d  %.2f %.4f" % (ids(p[0]) + (p[1]/UNIT, p[2])))
-  for p in mol.mm_bend:
-    s.append("angle %d %d %d  %.2f %.2f" % (ids(p[0]) + (p[1]/UNIT, p[2]*180/np.pi)))
-  for p in mol.mm_torsion:
-    s.append("torsion %d %d %d %d  " % ids(p[0])
-        + '  '.join("%.3f %.1f %d" % (q[0]/UNIT, q[1]*180/np.pi, q[2]) for q in p[1]))
-  for p in mol.mm_imptor:
-    s.append("imptors %d %d %d %d  " % ids(p[0])
-        + '  '.join("%.3f %.1f %d" % (q[0]/UNIT, q[1]*180/np.pi, q[2]) for q in p[1]))
-  for a in mol.atoms:
-    s.append("vdw %d  %.4f %.6f" % (a.mmtype, a.lj_r0/2, a.lj_eps/UNIT))
-  for a in mol.atoms:
-    s.append("charge %d  %.4f" % (a.mmtype, a.mmq))
-  return '\n'.join(s)

@@ -93,12 +93,14 @@ def update_vbo(vbo, data):
 
 # if normalized is true, OpenGL will scale integer values to [-1,1] or [0,1] range
 # - should be set if passing color as 4 GL_UNSIGNED_BYTES
-def bind_attrib(shader, name, vbo_or_array, size, type, normalized=GL_FALSE, stride=0, offset=0):
+def bind_attrib(shader, name, vbo_or_array, size, type, normalized=GL_FALSE, stride=0, offset=0, divisor=0):
   attr = glGetAttribLocation(shader, name)
   glEnableVertexAttribArray(attr)
   vbo = vbo_or_array if isinstance(vbo_or_array, VBO) else VBO(vbo_or_array)
   vbo.bind()
   glVertexAttribPointer(attr, size, type, normalized, stride, vbo+offset)
+  if divisor:
+    glVertexAttribDivisor(attr, divisor)   # for instanced drawing
   #vbo.unbind()
   return vbo
 

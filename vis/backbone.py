@@ -402,7 +402,7 @@ class VisBackbone:
     # extract backbone trace
     trace, orientation, ds_bounds, chain_breaks = [], [], [], []
     bbatoms, orientatoms = self.bbatoms, self.orientatoms
-    prev_chain = None
+    prev_chain = False  # can't use None since residue.chain will be None if chain is not set
     for resnum, residue in enumerate(mol.residues):
       # attempt to detect chain type based on first residue
       # ref: https://github.com/arose/ngl/blob/master/src/structure/structure-constants.js
@@ -422,7 +422,7 @@ class VisBackbone:
           chain_breaks.append(len(trace))
         prev_chain = residue.chain
         trace.extend([name_to_idx[a] for a in bbatoms])
-        dir = normalize(mol.atoms[name_to_idx[orientatoms[0]]].r - mol.atoms[name_to_idx[orientatoms[1]]].r)
+        dir = normalize(r[name_to_idx[orientatoms[0]]] - r[name_to_idx[orientatoms[1]]])
         # reverse orientation vector if > 90 degree change from previous residue (if `untwist`)
         if self.untwist and orientation and np.dot(orientation[-1], dir) < 0:
           dir = -dir
@@ -436,13 +436,13 @@ class VisBackbone:
             ca2 = next(jj for jj in cys2_atoms if mol.atoms[jj].name == 'CA')
             # resnum check is to prevent double counting
             if mol.atoms[sg2].resnum > resnum and self.sel_fn(mol.atoms[ca2], mol, ca2):
-              ds_bounds.append([mol.atoms[name_to_idx['CA']].r, mol.atoms[ca2].r])
+              ds_bounds.append([r[name_to_idx['CA']], r[ca2]])
           except: pass
       else:
-        prev_chain = None
+        prev_chain = False
 
     chain_breaks.append(len(trace))
-    color = [self.coloring(mol, ii) for ii in trace]
+    color = self.coloring(mol, trace)
     radii = [self.radius_fn(mol, ii, self.radius) for ii in trace]
     if self.style == 'tube':
       self.set_tube_data(r[trace], radii, color)

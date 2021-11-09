@@ -200,7 +200,7 @@ def gradoptim(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=
 
     # check for negative curvature; any advantage to doing a line search here?
     if iter > 0 and sg1 < sg0:  #np.dot(dr,y) <= 0:  # s.y = s.g - s.g0 = sg1 - sg0
-      print "Reseting due to negative curvature"
+      print("Reseting due to negative curvature")
       y = g - g0
       stepper.reset(H0=-np.dot(dr,y)/np.dot(y,y))  # let's reverse sign of curvature
 

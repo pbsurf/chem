@@ -1,1 +1,1 @@
-from .chemvis import Chemvis, Mol, Files, VisDLC, VisVectors, VisGeom, VisBackbone, VisTriangles
+from .chemvis import Chemvis, Mol, Files, VisDLC, VisVectors, VisGeom, VisBackbone, VisTriangles, VisGlobe

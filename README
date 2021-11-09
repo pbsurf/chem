@@ -8,6 +8,7 @@ Major features:
 - DLC/HDLC/Redundant internal coordinates
 - transition state search (Dimer method, Lanczos method), reaction path optimization (NEB)
 - read/write .pdb, TINKER, GAMESS and NWChem files
+- model creation and setup: build polypeptides, add hydrogens and bonds, mutate residues
 
 How to use this code:
 1. If an example in projects/ or test/ looks promising, try using that as a starting point
@@ -24,6 +25,7 @@ or
  - qmmm/resp.py: RESP/CHELPG charge fitting (only harmonic restraints currently)
  - mm.py: slow but simple MM energy and gradient for AMBER-type force field (and Hessian for Coulomb and LJ)
  - fep.py: simple FEP, BAR free energy calculations
+ - model/build.py: build polypeptides, add hydrogens and bonds, mutate residues
 
 Requirements:
 - Python 3 w/ scipy and numpy (should mostly still work with Python 2.7)

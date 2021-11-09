@@ -174,13 +174,11 @@ void main()
   vec3 new_point = ray_origin + t * ray_direction;
   // Discarding points outside cylinder
   float outside_top = dot(new_point - end_cyl, -H);
-  if (outside_top < 0.0) {
+  if (outside_top < 0.0)
     discard;
-  }
   float outside_bottom = dot(new_point - base, H);
-  if (outside_bottom < 0.0) {
+  if (outside_bottom < 0.0)
     discard;
-  }
 
   vec3 tmp_point = new_point - cylinder_origin.xyz;
   vec3 normal = normalize(tmp_point - H * dot(tmp_point, H));
@@ -188,6 +186,8 @@ void main()
   // calculate depth buffer value for point; assumes default gl_DepthRange of [0,1]
   vec4 projected_point = projection_mat * vec4(new_point, 1.0);
   gl_FragDepth = 0.5*(1.0 + projected_point.z/projected_point.w);
+  if (gl_FragDepth < 0.0)  // OpenGL clipping happens before frag shader, so we have to clip manually
+    discard;
 
   vec3 color = shading(new_point, normal, gl_Color.rgb);
   gl_FragData[0] = vec4(color, gl_Color.a);
@@ -220,28 +220,27 @@ class StickRenderer:
       return
 
     # get vertices and indices for a (0,0,0) - (1,1,1) cube
-    local, self.indices = cube_triangles()
-    # We pass the starting position 8 times, and each of these has
-    # a mapping to the bounding box corner.
-    self.bounds = np.array(bounds, dtype=np.float32)
-    vertices = np.repeat(self.bounds[:, 0], 8, axis=0).astype(np.float32)
-    directions = np.repeat(self.bounds[:, 1] - self.bounds[:, 0], 8, axis=0).astype(np.float32)
-    prim_radii = np.repeat(radii, 8, axis=0).astype(np.float32)
-    prim_colors = np.repeat(colors, 8, axis=0).astype(np.uint8)
-    local = np.tile(local, self.n_cylinders)
+    local, indices = cube_triangles()
+    bounds = np.asarray(bounds)  #, np.float32)
+    vertices = np.asarray(bounds[:, 0], np.float32)  #np.repeat(self.bounds[:, 0], 8, axis=0).astype(np.float32)
+    directions = np.asarray(bounds[:, 1] - bounds[:, 0], np.float32)  #np.repeat(..., 8, axis=0).astype(np.float32)
+    prim_radii = np.asarray(radii, np.float32)  #np.repeat(radii, 8, axis=0).astype(np.float32)
+    prim_colors = np.asarray(colors, np.uint8)  #np.repeat(colors, 8, axis=0).astype(np.uint8)
+    #local = np.tile(local, self.n_cylinders)
 
     if self.vao is None:
       self.vao = glGenVertexArrays(1)
       glBindVertexArray(self.vao)
-      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT)
-      self._color_vbo = bind_attrib(self.shader, 'color', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
+      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT, divisor=1)
+      self._color_vbo = bind_attrib(self.shader, 'color', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE, divisor=1)
       self._local_vbo = bind_attrib(self.shader, 'vert_local_coordinate', local, 3, GL_FLOAT)
-      self._directions_vbo = bind_attrib(self.shader, 'cylinder_axis', directions, 3, GL_FLOAT)
-      self._radii_vbo = bind_attrib(self.shader, 'cylinder_radius', prim_radii, 1, GL_FLOAT)
+      self._directions_vbo = bind_attrib(self.shader, 'cylinder_axis', directions, 3, GL_FLOAT, divisor=1)
+      self._radii_vbo = bind_attrib(self.shader, 'cylinder_radius', prim_radii, 1, GL_FLOAT, divisor=1)
+      self._elem_vbo = VBO(np.asarray(indices, np.uint32), target=GL_ELEMENT_ARRAY_BUFFER)
+      self._elem_vbo.bind()
       glBindVertexArray(0)
-
-      gl_indices = np.repeat([0], 36 * self.n_cylinders)
-      self._elem_vbo = VBO(gl_indices, target=GL_ELEMENT_ARRAY_BUFFER)
+      #gl_indices = np.repeat([0], 36 * self.n_cylinders)
+      #self._elem_vbo = VBO(gl_indices, target=GL_ELEMENT_ARRAY_BUFFER)
     else:
       # just update existing VBO for subsequent calls
       update_vbo(self._verts_vbo, vertices)
@@ -249,13 +248,12 @@ class StickRenderer:
       update_vbo(self._local_vbo, local)
       update_vbo(self._color_vbo, prim_colors)
       update_vbo(self._radii_vbo, prim_radii)
+      update_vbo(self._elem_vbo, np.asarray(indices, np.uint32))
 
 
   def draw(self, viewer):
     if self.n_cylinders == 0:
       return
-    # GL state
-    #glDepthMask(GL_FALSE)
     glEnable(GL_CULL_FACE)
     glCullFace(GL_BACK)
 
@@ -270,34 +268,33 @@ class StickRenderer:
 
     # VAO
     glBindVertexArray(self.vao)
-
-    if self.ordered_draw:
-      # sort cylinders from back to front if transparent
-      dir_to_camera = 0.5*(self.bounds[:, 0] + self.bounds[:, 1]) - camera.position
-      dist_to_camera_sq = np.sum(dir_to_camera*dir_to_camera, 1)
-      # reverse order so indicies are given (and elements drawn) from far to near
-      sort_order = np.argsort(dist_to_camera_sq)[::-1]
-    else:
-      sort_order = range(self.n_cylinders)
-
-    gl_indices = np.repeat(sort_order, 36)*8 + np.tile(self.indices, len(sort_order))
-    self._elem_vbo.set_array(gl_indices.astype(np.uint32))
-    self._elem_vbo.bind()
-    glDrawElements(GL_TRIANGLES, len(gl_indices), GL_UNSIGNED_INT, None)  #self._elem_vbo)
+    #if self.ordered_draw:
+    #  # sort cylinders from back to front if transparent
+    #  dir_to_camera = 0.5*(self.bounds[:, 0] + self.bounds[:, 1]) - camera.position
+    #  dist_to_camera_sq = np.sum(dir_to_camera*dir_to_camera, 1)
+    #  # reverse order so indicies are given (and elements drawn) from far to near
+    #  sort_order = np.argsort(dist_to_camera_sq)[::-1]
+    #else:
+    #  sort_order = range(self.n_cylinders)
+    #gl_indices = np.repeat(sort_order, 36)*8 + np.tile(self.indices, len(sort_order))
+    #self._elem_vbo.set_array(gl_indices.astype(np.uint32))
+    #self._elem_vbo.bind()
+    #glDrawElements(GL_TRIANGLES, len(gl_indices), GL_UNSIGNED_INT, None)  #self._elem_vbo)
     #self._elem_vbo.unbind()
+
+    glDrawElementsInstanced(GL_TRIANGLES, 36, GL_UNSIGNED_INT, None, self.n_cylinders)
     glBindVertexArray(0)
     glUseProgram(0)
-
-    #glDepthMask(GL_TRUE)
     glDisable(GL_CULL_FACE)
 
 
 # Sphere imposters
-# Ref: https://paroj.github.io/gltut/Illumination/Tut13%20Correct%20Chicanery.html
+# Ref: paroj.github.io/gltut/Illumination/Tut13%20Correct%20Chicanery.html
+# Texturing: bgolus.medium.com/rendering-a-sphere-on-a-quad-13c92025570c
 
 SPHERE_VERT_SHADER = """
-uniform mat4 camera_mat;
-uniform mat4 projection_mat;
+uniform mat4 mv_matrix;
+uniform mat4 p_matrix;
 uniform float scalefac;
 
 attribute vec3 position;
@@ -312,18 +309,26 @@ varying float sphere_radius;
 void main()
 {
   vec4 actual_vertex = vec4(position, 1.0);
-  sphere_center = (camera_mat*actual_vertex).xyz;
+  sphere_center = (mv_matrix*actual_vertex).xyz;
   mapping = at_mapping;
   sphere_radius = at_sphere_radius;
-  actual_vertex = camera_mat*actual_vertex + vec4(mapping*sphere_radius*scalefac, 0.0, 0.0);
-  gl_Position = projection_mat * actual_vertex;
+
+  if(p_matrix[0][0] == 0.0)
+    gl_Position = vec4(0.05*mapping*sphere_radius*scalefac + vec2(0.75, 0.75), 0.0, 1.0);
+  else {
+    actual_vertex = mv_matrix*actual_vertex + vec4(mapping*sphere_radius*scalefac, 0.0, 0.0);
+    gl_Position = p_matrix * actual_vertex;
+  }
   gl_FrontColor = color;
 }
 """
 
 SPHERE_FRAG_SHADER = """
-uniform mat4 projection_mat;
+uniform mat4 inv_mv_matrix;
+uniform mat4 p_matrix;
 uniform float scalefac;
+
+uniform sampler2D sphere_tex;
 
 // sphere-related
 varying vec2 mapping;
@@ -332,7 +337,7 @@ varying float sphere_radius;
 
 void impostor_point_normal(out vec3 point, out vec3 normal)
 {
-  bool ortho = projection_mat[3][3] == 1.0;  // 1.0 for orthographic prog, 0.0 for perspective
+  bool ortho = p_matrix[3][3] == 1.0;  // 1.0 for orthographic prog, 0.0 for perspective
 
   // Get point P on the square
   vec3 P_map = vec3(sphere_radius*mapping.xy*scalefac, 0) + sphere_center;
@@ -362,23 +367,29 @@ void main()
   impostor_point_normal(point, normal);
 
   // calculate depth buffer value for point; assumes default gl_DepthRange of [0,1]
-  vec4 point_clipspace = projection_mat * vec4(point, 1.0);
+  vec4 point_clipspace = p_matrix * vec4(point, 1.0);
   gl_FragDepth = 0.5*(1.0 + point_clipspace.z/point_clipspace.w);
+  if(gl_FragDepth < 0.0)  // OpenGL clipping happens before frag shader, so we have to clip manually
+    discard;
 
-  vec3 color = shading(point, normal, gl_Color.rgb);
-  gl_FragData[0] = vec4(color, gl_Color.a);
+  vec4 col = gl_Color;
+  if(col.a == 0) {  // alpha == 0 used as flag for textured sphere
+    vec3 nm = normalize(mat3(inv_mv_matrix)*normal);
+    vec2 uv = vec2(0.75 - atan(nm.z, nm.x)/(2.0*3.14159), acos(-nm.y)/3.14159);
+    col = texture2D(sphere_tex, uv);
+  }
+  vec3 color = shading(point, normal, col.rgb);  //gl_Color.rgb);
+  gl_FragData[0] = vec4(color, col.a);
   // Must write normal with 4th component as 1.0 since blend fn affects all color attachments!
   gl_FragData[1] = vec4(normal * 0.5 + 0.5, 1.0);
 }
 """
 
-
 class BallRenderer:
 
-  def __init__(self, name="BallRenderer"):
-    self.name = name
-    self.shader = None
-    self.vao = None
+  def __init__(self, name="BallRenderer", texture=None, inset=False):
+    self.name, self.texture, self.inset = name, texture, inset
+    self.shader, self.vao, self.sphere_tex = None, None, None
 
 
   def set_data(self, positions, radii, colors):
@@ -388,29 +399,33 @@ class BallRenderer:
       fs = compileShader([m.fs_code() for m in self.modules] + [SPHERE_FRAG_SHADER], GL_FRAGMENT_SHADER)
       self.shader = compileProgram(vs, fs)
 
-    #self.positions = positions
+    if self.sphere_tex is None and self.texture is not None:
+      from PIL import Image
+      img = Image.open(self.texture)
+      img_bytes = img.tobytes("raw", "RGBX", 0, -1)
+      self.sphere_tex = create_texture(img.width, img.height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE, img_bytes, wrap= GL_REPEAT)
+
+    if self.sphere_tex is not None:
+      colors = [(0,0,0,0)]*len(radii)
     self.n_spheres = len(positions)
-    vertices = np.repeat(positions, 6, axis=0).astype(np.float32)
-    radii = np.repeat(radii, 6, axis=0).astype(np.float32)
-    colors = np.repeat(colors, 6, axis=0).astype(np.uint8)
+    # note that instanced drawing doesn't require any shader changes
+    vertices = np.asarray(positions, np.float32)  #np.repeat(positions, 6, axis=0).astype(np.float32)
+    radii = np.asarray(radii, np.float32)  #np.repeat(radii, 6, axis=0).astype(np.float32)
+    colors = np.asarray(colors, np.uint8)  #np.repeat(colors, 6, axis=0).astype(np.uint8)
     # two triangles for a square
-    mapping = np.tile([
+    mapping = np.asarray([
         1.0,1.0, -1.0,1.0, -1.0,-1.0,  # CCW triangle 1
         1.0,1.0, -1.0,-1.0, 1.0,-1.0   # CCW triangle 2
-      ], self.n_spheres).astype(np.float32)
+      ], np.float32)  #np.tile(..., self.n_spheres).astype(np.float32)
 
     if self.vao is None:
       self.vao = glGenVertexArrays(1)
       glBindVertexArray(self.vao)
-      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT)
-      self._color_vbo = bind_attrib(self.shader, 'color', colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
-      self._mapping_vbo = bind_attrib(self.shader, 'at_mapping', mapping, 2, GL_FLOAT)
-      self._radius_vbo = bind_attrib(self.shader, 'at_sphere_radius', radii, 1, GL_FLOAT)
+      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT, divisor=1)
+      self._color_vbo = bind_attrib(self.shader, 'color', colors, 4, GL_UNSIGNED_BYTE, GL_TRUE, divisor=1)
+      self._mapping_vbo = bind_attrib(self.shader, 'at_mapping', mapping, 2, GL_FLOAT) # divisor=0
+      self._radius_vbo = bind_attrib(self.shader, 'at_sphere_radius', radii, 1, GL_FLOAT, divisor=1)
       glBindVertexArray(0)
-
-      ##gl_indices = np.repeat([0], 6 * self.n_spheres)
-      ##self._elem_vbo = VBO(gl_indices, target=GL_ELEMENT_ARRAY_BUFFER)
-
     else:
       # just update existing VBO for subsequent calls
       update_vbo(self._verts_vbo, vertices)
@@ -422,38 +437,40 @@ class BallRenderer:
   def draw(self, viewer):
     # We do not want GL_CULL_FACE as we only have a single square (vs. a whole cube for cylinder imposters)
     #glDepthMask(GL_FALSE)
-
     glUseProgram(self.shader)
     for m in self.modules:
       m.setup_shader(self.shader, viewer)
-    set_uniform(self.shader, 'camera_mat', 'mat4fv', viewer.view_matrix())
-    set_uniform(self.shader, 'projection_mat', 'mat4fv', viewer.proj_matrix())
+
+    mv_matrix = np.dot(viewer.camera._get_rotation_matrix(), translation_matrix(50*normalize(
+        viewer.camera.pivot - viewer.camera.position))) if self.inset else viewer.view_matrix()
+    p_matrix = np.zeros((4,4)) if self.inset else viewer.proj_matrix()
+
+    set_uniform(self.shader, 'mv_matrix', 'mat4fv', mv_matrix)
+    set_uniform(self.shader, 'inv_mv_matrix', 'mat4fv', np.linalg.inv(mv_matrix))
+    set_uniform(self.shader, 'p_matrix', 'mat4fv', p_matrix)
     set_uniform(self.shader, 'scalefac', '1f', 1.5)
+    if self.sphere_tex is not None:
+      set_sampler(self.shader, 'sphere_tex', 0, self.sphere_tex)
 
     glBindVertexArray(self.vao)
-
-
-    ##if True: ##self.ordered_draw:
-    ##  # sort balls from front to back if transparent
-    ##  dir_to_camera = self.positions - camera.position
-    ##  dist_to_camera_sq = np.sum(dir_to_camera*dir_to_camera, 1)
-    ##  # reverse order so indicies are given (and elements drawn) from far to near
-    ##  sort_order = np.argsort(dist_to_camera_sq)  ##[::-1]
-    ##else:
-    ##  sort_order = range(self.n_spheres)
-    ##
-    ##gl_indices = np.repeat(sort_order, 6)*6 + np.tile(range(6), len(sort_order))
-    ##self._elem_vbo.set_array(gl_indices.astype(np.uint32))
-    ##self._elem_vbo.bind()
-    ##glDrawElements(GL_TRIANGLES, len(gl_indices), GL_UNSIGNED_INT, None)  #self._elem_vbo)
-
-
-    glDrawArrays(GL_TRIANGLES, 0, 6*self.n_spheres)
-
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.n_spheres)  #glDrawArrays(GL_TRIANGLES, 0, 6*self.n_spheres)
+    #if True: ##self.ordered_draw:
+    #  # sort balls from front to back if transparent
+    #  dir_to_camera = self.positions - camera.position
+    #  dist_to_camera_sq = np.sum(dir_to_camera*dir_to_camera, 1)
+    #  # reverse order so indicies are given (and elements drawn) from far to near
+    #  sort_order = np.argsort(dist_to_camera_sq)  ##[::-1]
+    #else:
+    #  sort_order = range(self.n_spheres)
+    #
+    #gl_indices = np.repeat(sort_order, 6)*6 + np.tile(range(6), len(sort_order))
+    #self._elem_vbo.set_array(gl_indices.astype(np.uint32))
+    #self._elem_vbo.bind()
+    #glDrawElements(GL_TRIANGLES, len(gl_indices), GL_UNSIGNED_INT, None)  #self._elem_vbo)
     glBindVertexArray(0)
+    if self.sphere_tex is not None:
+      unbind_texture(0)
     glUseProgram(0)
-    #glDepthMask(GL_TRUE)
-
 
 
 LINE_VERT_SHADER = """
@@ -542,27 +559,25 @@ class LineRenderer:
     if self.n_lines == 0:
       return
 
+    bounds = np.asarray(bounds)
+    vertices = np.asarray(bounds[:, 0], np.float32)  #np.repeat(..., 6, axis=0)
+    directions = np.asarray(bounds[:, 1] - bounds[:, 0], np.float32)  #np.repeat(..., 6, axis=0)
+    prim_radii = np.asarray(radii, np.float32)  #np.repeat(..., 6, axis=0)
+    prim_colors = np.asarray(colors, np.uint8)  #np.repeat(..., 6, axis=0)
     # two triangles for a square
-    mapping = np.tile([
-        1.0,1.0, 0.0,1.0, 0.0,-1.0,  # CCW triangle 1
+    mapping = np.asarray([
+        1.0,1.0, 0.0, 1.0, 0.0,-1.0,  # CCW triangle 1
         1.0,1.0, 0.0,-1.0, 1.0,-1.0   # CCW triangle 2
-      ], self.n_lines).astype(np.float32)
-
-    # 6 vertices for each line:
-    self.bounds = np.array(bounds, dtype=np.float32)
-    vertices = np.repeat(self.bounds[:, 0], 6, axis=0).astype(np.float32)
-    directions = np.repeat(self.bounds[:, 1] - self.bounds[:, 0], 6, axis=0).astype(np.float32)
-    prim_radii = np.repeat(radii, 6, axis=0).astype(np.float32)
-    prim_colors = np.repeat(colors, 6, axis=0).astype(np.uint8)
+      ], np.float32)   #np.tile(..., self.n_lines).astype(np.float32)
 
     if self.vao is None:
       self.vao = glGenVertexArrays(1)
       glBindVertexArray(self.vao)
-      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT)
+      self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT, divisor=1)
       self._local_vbo = bind_attrib(self.shader, 'mapping', mapping, 2, GL_FLOAT)
-      self._directions_vbo = bind_attrib(self.shader, 'direction', directions, 3, GL_FLOAT)
-      self._radii_vbo = bind_attrib(self.shader, 'line_radius', prim_radii, 1, GL_FLOAT)
-      self._color_vbo = bind_attrib(self.shader, 'color_in', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
+      self._directions_vbo = bind_attrib(self.shader, 'direction', directions, 3, GL_FLOAT, divisor=1)
+      self._radii_vbo = bind_attrib(self.shader, 'line_radius', prim_radii, 1, GL_FLOAT, divisor=1)
+      self._color_vbo = bind_attrib(self.shader, 'color_in', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE, divisor=1)
       glBindVertexArray(0)
     else:
       # just update existing VBO for subsequent calls
@@ -588,7 +603,7 @@ class LineRenderer:
 
     # draw
     glBindVertexArray(self.vao)
-    glDrawArrays(GL_TRIANGLES, 0, 6*self.n_lines)
+    glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.n_lines)
     glBindVertexArray(0)
     glUseProgram(0)
 
@@ -597,16 +612,15 @@ class LineRenderer:
 # ball-and-stick?  separate radii for balls and sticks?
 class VisGeom:
 
-  def __init__(self, style='licorice', sel=None, radius=1.0, coloring=color_by_element, colors=None):
+  def __init__(self, style='licorice', sel=None, radius=1.0, coloring=color_by_element, colors=None, cache=True):
     """ render atoms selected by `sel` with `style` ('licorice', 'lines', 'spacefill'), radius scale factor
       `radius`, and `coloring`/`colors`
     """
-    self.radius = radius
-    self.style = style
+    self.style, self.sel, self.radius, self.cache = style, sel, radius, cache
     self.mol_styles = ['licorice', 'spacefill', 'lines']  # too hard to set initial style w/ itertools.cycles
     self.style_idx = self.mol_styles.index(style) if style in self.mol_styles else 0
     self.coloring = (lambda *args: coloring(*args, colors=colors)) if colors is not None else coloring
-    self.sel = sel
+    self.active, self.bonds, self.mol = None, None, None
     self.stick_renderer = StickRenderer() #ordered_draw=(opacity < 1.0))
     self.ball_renderer = BallRenderer()
     self.line_renderer = LineRenderer()
@@ -629,8 +643,8 @@ class VisGeom:
 
       # b0, b1 = map(list, zip(*bonds)) -- slower
       # bonds = np.array(bonds); b0, b1 = bonds[:,0], bonds[:,1] -- even slower due to np.array() creation
-      starts = r_array[[b[0] for b in bonds]]
-      ends = r_array[[b[1] for b in bonds]]
+      starts = r_array[bonds[:,0]]  #[b[0] for b in bonds]]
+      ends = r_array[bonds[:,1]]  #[b[1] for b in bonds]]
       middle = (starts + ends)/2
 
       bounds = np.empty((2*len(bonds), 2, 3))
@@ -641,11 +655,8 @@ class VisGeom:
       return bounds
 
     bounds = cyl_bounds(r_array, bonds)
-    radii = [radius] * len(bounds)
-    colors = []
-    for i, j in bonds:
-      colors.append(self.coloring(mol, i))  #self.atom_color(atomnos[i]))
-      colors.append(self.coloring(mol, j))  #self.atom_color(atomnos[j]))
+    radii = np.full(len(bounds), radius)
+    colors = self.coloring(mol, bonds.reshape(-1))
 
     # double bonds - inspired by ngl, but I mostly did this to provide a reason for avoiding cylinder caps
     ## TODO: need to use other bonds for atom to set orientation (dr)
@@ -658,17 +669,14 @@ class VisGeom:
         dr = np.cross(r1 - r0, [0, 0, 1])
         dr = (1 - dbl_scale) * radius * dr/norm(dr)
         dbl_bounds.append(cyl_bounds(np.array([r0+dr, r1+dr, r0-dr, r1-dr]), np.array([[0,1], [2,3]])))
-
-        c0 = self.coloring(mol, i)
-        c1 = self.coloring(mol, j)
-        dbl_colors.extend([c0, c1, c0, c1])
+        dbl_colors.extend(self.coloring(mol, [i, j, i, j]))
 
       dbl_bounds = np.concatenate(dbl_bounds)
       dbl_radii = [radius*dbl_scale] * len(dbl_bounds)
 
       bounds = np.concatenate((bounds, dbl_bounds))
-      radii.extend(dbl_radii)
-      colors.extend(dbl_colors)
+      radii = np.concatenate((radii, dbl_radii))
+      colors = np.concatenate((colors, dbl_colors))
 
     return bounds, radii, colors
 
@@ -683,47 +691,50 @@ class VisGeom:
 
 
   # is there any advantage to supporting passing bonds + r + z to MolRenderer instead of just mol?
-  def set_molecule(self, mol, r=None, active=None):
-    """ Set current molecule to `mol`. If `active` is nonempty, only active atoms and bonds containing only
-      active atoms will be rendered
-    """
+  def set_molecule(self, mol, r=None):
+    """ Set current molecule to `mol` """
+    # select() is slow, so don't rerun for same molecule
+    if self.mol != mol or not self.cache:
+      self.active, self.bonds = None, None
     self.mol = mol
     self.r = mol.r if r is None else r
-    atomnos, bonds, dbl_bonds = mol.znuc, mol.bonds, [] #mol.dbl_bonds()
-    # we're no longer caching result of decode_atom_sel(sel) so sel can be updated
-    self.active = select_atoms(mol, self.sel) if self.sel and active is None else active
+    self.active = mol.select(self.sel) if self.active is None else self.active
+    atomnos = mol.znuc
     # line radius is in pixels, all others in Ang
     radius = self.radius * (1.75 if self.style == 'lines' else 0.2)
     if self.style in ['licorice', 'lines']:
-      if self.active is not None:
-        activeset = frozenset(self.active)  # critical for performance
-        bonds = [b for b in bonds if b[0] in activeset and b[1] in activeset]
-        dbl_bonds = [b for b in dbl_bonds if b[0] in activeset and b[1] in activeset]
-      cyl_bounds, cyl_radii, cyl_colors = self.cylinder_data(mol, bonds, self.r, atomnos, dbl_bonds, radius)
+      activeset = frozenset(self.active) if self.sel is not None else None
+      self.bonds = np.array(mol.get_bonds(activeset)) if self.bonds is None else self.bonds
+      # no double bonds for now
+      cyl_bounds, cyl_radii, cyl_colors = self.cylinder_data(mol, self.bonds, self.r, atomnos, [], radius)
       if self.style == 'licorice':
         self.stick_renderer.set_data(cyl_bounds, cyl_radii, cyl_colors)
       elif self.style == 'lines':
         # draw a 3D cross (axis-aligned) for any lone atoms in lines representation; make this optional?
-        bonded_atoms = frozenset([a for bond in bonds for a in bond])
-        lone_bounds = []
-        for ii, r in enumerate(self.r):
-          if ii not in bonded_atoms and (self.active is None or ii in activeset):
-            cr = ELEMENTS[atomnos[ii]].cov_radius if atomnos[ii] > 0 else 0.5
-            lone_bounds.append(np.array([[r + [cr, 0, 0], r - [cr, 0, 0]]]))
-            lone_bounds.append(np.array([[r + [0, cr, 0], r - [0, cr, 0]]]))
-            lone_bounds.append(np.array([[r + [0, 0, cr], r - [0, 0, cr]]]))
-            cyl_radii.extend([radius]*3)
-            cyl_colors.extend([self.coloring(mol, ii)]*3)
-        cyl_bounds = np.concatenate((cyl_bounds, np.concatenate(lone_bounds))) if lone_bounds else cyl_bounds
+        lone_bounds, lone_radii, lone_colors = [], [], []
+        unbound_atoms = (activeset or frozenset(self.active)) - frozenset(self.bonds.reshape(-1))
+        for ii in unbound_atoms:
+          rii = self.r[ii]
+          cr = ELEMENTS[atomnos[ii]].cov_radius if atomnos[ii] > 0 else 0.5
+          lone_bounds.append(np.array([[rii + [cr, 0, 0], rii - [cr, 0, 0]]]))
+          lone_bounds.append(np.array([[rii + [0, cr, 0], rii - [0, cr, 0]]]))
+          lone_bounds.append(np.array([[rii + [0, 0, cr], rii - [0, 0, cr]]]))
+          lone_radii.extend([radius]*3)
+          lone_colors.extend([ self.coloring(mol, [ii])[0] ]*3)
+        if unbound_atoms:
+          cyl_bounds = np.concatenate((cyl_bounds, np.concatenate(lone_bounds)))
+          cyl_radii = np.concatenate((cyl_radii, lone_radii))
+          cyl_colors = np.concatenate((cyl_colors, lone_colors))
         self.line_renderer.set_data(cyl_bounds, cyl_radii, cyl_colors)
     if self.style in ['spacefill', 'licorice']:
-      active = range(len(self.r)) if self.active is None else self.active
-      ball_colors = [self.coloring(mol, ii) for ii in active]
-      if self.style == 'spacefill':
-        ball_radii = [self.radius*ELEMENTS[mol.atoms[ii].znuc].vdw_radius for ii in active]
+      ball_colors = self.coloring(mol, self.active)
+      if not np.isscalar(self.radius):
+        ball_radii = self.radius if len(self.radius) == len(self.active) else self.radius[self.active]
+      elif self.style == 'spacefill':
+        ball_radii = [self.radius*ELEMENTS[atomnos[ii]].vdw_radius for ii in self.active]
       else:
-        ball_radii = [radius]*len(active)
-      self.ball_renderer.set_data(self.r[active], ball_radii, ball_colors)
+        ball_radii = np.full(len(self.active), radius)
+      self.ball_renderer.set_data(self.r[self.active], ball_radii, ball_colors)
     return self
 
 
@@ -732,12 +743,12 @@ class VisGeom:
       # toggle molecule rendering method
       self.style_idx = (self.style_idx + 1) % len(self.mol_styles)
       self.style = self.mol_styles[self.style_idx]
-      self.set_molecule(self.mol, self.r, self.active)  # force refresh
+      self.set_molecule(self.mol, self.r)  # force refresh
       print("Molecule style: %s" % self.style)
     elif key in 'ER':
       self.radius *= np.power((1.25 if key == 'R' else 0.8), (10 if 'Shift' in mods else 1))
       # TODO: radius scale should be a shader uniform so we don't have to refresh!
-      self.set_molecule(self.mol, self.r, self.active)
+      self.set_molecule(self.mol, self.r)
       print("Radius (scale): %0.3f" % self.radius)
     else:
       return False
