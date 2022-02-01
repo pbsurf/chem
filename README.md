@@ -1,4 +1,4 @@
-chem: collection of mostly python code for molecular visualization and QM/MM calculations.  Intended for interactive use from standard python prompt.
+chem: collection of mostly python code for molecular visualization, QM/MM, FEP, etc.  Very long-term goal is something like enzyme design.  Intended for interactive use from standard python prompt.
 
 Major features:
 - 3D visualization of molecular geometry, orbitals, ESP, etc.
@@ -8,14 +8,13 @@ Major features:
 - DLC/HDLC/Redundant internal coordinates
 - transition state search (Dimer method, Lanczos method), reaction path optimization (NEB)
 - read/write .pdb, TINKER, GAMESS and NWChem files
-- model creation and setup: build polypeptides, add hydrogens and bonds, mutate residues
+- model creation and setup: build polypeptides, add hydrogens and bonds, mutate residues, solvate
 
 How to use this code:
-1. If an example in projects/ or test/ looks promising, try using that as a starting point
+1. If an example in projects/ or test/ looks promising, try using that as a starting point ... all the examples are outdated or work-in-progress currently.  Open an issue describing what you're interested in doing and I'll help with getting started.
 - for example, see the "Preparation" section in projects/trypsin1.py; then from the folder containing 1MCT-trimI.pdb, at a Python prompt, run `execfile('<path to this repo>/projects/trypsin1.py')`
 - add `import pdb; pdb.set_trace()` to step line by line
-- see misc/chem-inst.sh for setup on Debian or related Linux distros
-- see "Examples" section in vis/chemvis.py for standalone visualization examples
+- see "Examples" in test/vis_test.py for standalone visualization examples
 or
 2. Cut and paste what you need: code is kept as self-contained as possible
  - opt/dlc.py: delocalized internal coordinates (DLC) and hybrid DLC; useful for geometry opt. w/ constraints
@@ -29,19 +28,22 @@ or
 
 Requirements:
 - Python 3 w/ scipy and numpy (should mostly still work with Python 2.7)
-- [TINKER](https://dasher.wustl.edu/tinker/) or [OpenMM](https://openmm.org/) - molecular mechanics calculations
+- [OpenMM](https://openmm.org/) - molecular mechanics calculations
 - [PySCF](https://github.com/sunqm/pyscf) - quantum chemistry calculations
 
+See misc/chem-inst.sh for setup on Debian/Ubuntu
+
 Optionally:
-- GAMESS (US) or NWChem - quantum chemistry calculations
 - [openmmtools](https://github.com/choderalab/openmmtools) - free energy calculations
+- [TINKER](https://dasher.wustl.edu/tinker/) - molecular mechanics calculations
+- GAMESS (US) or NWChem - quantum chemistry calculations
 - https://github.com/cclib/cclib - for reading GAMESS and NWChem output
 
-Credit to [chemlab](https://github.com/chemlab/chemlab/) (3D camera, some shaders) and [speck](https://github.com/wwwtyro/speck) (some shaders), among others
+Credit to [chemlab](https://github.com/chemlab/chemlab/) (3D camera, some shaders) and [speck](https://github.com/wwwtyro/speck) (some shaders), among others.
 
 License:
-Any published results obtained using this software should be accompanied by all code needed to replicate
+Any published results obtained using this software should be accompanied by all code needed to replicate.
 
-Screenshot: 1MCT.pdb shown with backbone ribbon, MM atoms as lines, QM atoms as sticks, and components of QM/MM force on each atom as yellow, cyan, magenta cylinders
+Screenshot: 1MCT.pdb shown with backbone ribbon, MM atoms as lines, QM atoms as sticks, and components of QM/MM force on each atom as yellow, cyan, magenta cylinders.
 
 ![Screenshot](misc/screenshot.png)
