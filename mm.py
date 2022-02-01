@@ -522,10 +522,9 @@ def residue_terminal(mol, resnum):
 
 # we no longer assign numeric mmtypes for Tinker ... as easy as mol.mmtype = np.arange(mol.natoms) + mmtype0
 #  - mmtype0 must be <1000 (Tinker has maxclass=1000 by default) and, for AMBER, >648
-def set_mm_params(mol, parm, reslib=None):
+def set_mm_params(mol, parm, reslib=None, allowmissing=False):
   """ load MM params for a molecule `mol` from Amber parameters `parm` """
   UNIT = 1.0/KCALMOL_PER_HARTREE
-  getparm = lambda p, a: p.get('-'.join(a), None) or p.get('-'.join(a[::-1]), None)
   mol.mm_stretch, mol.mm_bend, mol.mm_torsion, mol.mm_imptor = [], [], [], []
   bonds, angles, diheds = mol.get_internals()
   # charge and mmtype from reslib
@@ -535,14 +534,25 @@ def set_mm_params(mol, parm, reslib=None):
       for jj in res.atoms:
         mol.atoms[jj].mmtype, mol.atoms[jj].mmq = resdat[mol.atoms[jj].name]
   mmtypes = mol.mmtype  #np.array([a.name.upper() for a in mol.atoms])
+  # helper fns
+  getparm = lambda p, a: p.get('-'.join(a), None) or p.get('-'.join(a[::-1]), None)
+  def checkparm(p, b):
+    if p is None:
+      print("Missing MM parameters for {}; atoms {}".format('-'.join(mmtypes[list(b)]), b))
+      assert allowmissing, "Missing parameters not permitted!"
+    return p is not None
+  # ---
   for b in bonds:
     p = getparm(parm.stretch, mmtypes[list(b)])
+    if not checkparm(p, b): continue
     mol.mm_stretch.append(( list(b), float(p[0])*UNIT, float(p[1]) ))
   for b in angles:
     p = getparm(parm.bend, mmtypes[list(b)])
+    if not checkparm(p, b): continue
     mol.mm_bend.append(( list(b), float(p[0])*UNIT, float(p[1])*np.pi/180 ))
   for b in diheds:
     ps = getparm(parm.torsion, mmtypes[list(b)]) or getparm(parm.torsion, ['X', mmtypes[b[1]], mmtypes[b[2]], 'X'])
+    if not checkparm(ps, b): continue
     # when comparing, note that Tinker amber*.prm torsions are already divided by the p[0] value
     l = [( float(p[1])/float(p[0])*UNIT, float(p[2])*np.pi/180, abs(float(p[3])) ) for p in ps if float(p[1]) != 0.0]
     if l:

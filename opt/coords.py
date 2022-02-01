@@ -5,13 +5,17 @@ from ..basics import *
 # coord object for Cartesians
 class XYZ:
   def __init__(self, X, active=None, atoms=None, ravel=True):
+    """ `atoms` is list of atoms included in this coord object (default is all), `active` is list of atoms
+      active for optimization, `X` is object with 'r' attribute or r array or r[atoms] (i.e., already sliced)
+      arrays of coordinates are flattened to 1D if `ravel` is True
+    """
     # slice(None) as index selects all elements - note that gradfromxyz and active will return copies!
     self.actv = active if active is not None else slice(None)
     self.atoms = atoms  # for use w/ HDLC
     self.ravel = ravel
-    self.X = X.r if hasattr(X, 'atoms') else np.array(X)  #np.asarray(getattr(X, 'r', X)) - asarray doesn't copy!
-    if atoms and len(atoms) != len(self.X):
-      self.X = self.X[atoms]
+    X = getattr(X, 'r', X)
+    # atoms=range(...) will copy, but slice(...) returns view ... OK since len(slice()) throws!
+    self.X = X[atoms] if atoms and len(atoms) != len(X) else np.array(X)
 
   def __repr__(self):
     return "XYZ(atoms: %d, active atoms: %d)" % (len(self.X), np.size(self.active())/3)
@@ -47,9 +51,9 @@ class Rigid:
   def __init__(self, X, atoms=None, pivot=None):
     self.atoms = atoms  # for use w/ HDLC
     self.pivot = pivot
-    self.X = X.r if hasattr(X, 'atoms') else np.array(X)
-    if atoms and len(atoms) != len(self.X):
-      self.X = self.X[atoms]
+    X = getattr(X, 'r', X)
+    # atoms=range(...) will copy, but slice(...) returns view ... OK since len(slice()) throws!
+    self.X = X[atoms] if atoms and len(atoms) != len(X) else np.array(X)
 
   def __repr__(self):
     return "Rigid(atoms: %d)" % len(self.X)

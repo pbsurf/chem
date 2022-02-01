@@ -88,6 +88,25 @@ mol.dihedral((1, 0, 2, 5), 90.0)  # change H6 position for better docking
 # - make vdW strength of pairs much stronger? how? just set all other pairs to repel only?
 
 
+## A more general dock() would also randomize major diheds (and probably drop the ligalign/hostalign stuff)
+# - aside: autodock scoring fn is simple: https://github.com/ttjoseph/mmdevel/blob/master/VinaScore/vinascore.py
+def major_diheds(mol):
+  """ get dihedrals with more than 4 atoms on each side """
+  _, _, diheds = mol.get_internals(active=mol.select(ligin))
+  dbnds = np.unique([sorted(d[1:3]) for d in diheds], axis=0).tolist()
+  minpar = []
+  for b in dbnds:
+    try:
+      l1, l2 = mol.partition(b[0], b[1])
+      minpar.append(min(len(l1), len(l2)))
+    except:
+      minpar.append(0)
+  ord = argsort(minpar)[::-1]
+  pardiheds = [next(d for d in diheds if sorted(d[1:3]) == dbnds[ii]) for ii in ord if minpar[ii] > 4]
+  minpar = [minpar[ii] for ii in ord if minpar[ii] > 4]
+  return pardiheds, minpar
+
+
 def dock(mol, ligatoms, ligalign, hostalign, niter=1000, maxdr=5.0, kmsd=0.01, usecharge=False):
   r = mol.r
   rpiv = np.mean(r[ligalign], axis=0)
@@ -145,8 +164,8 @@ except:
   # check box visually
   #if 0:
   #  from chem.vis.chemvis import *
-  #  vertices, normals, indices = cube_separate(flat=False)  # returns unit cube: (0..1,0..1,0..1)
-  #  vertices = np.dot(vertices, np.diag(mol.pbcbox)) - 0.5*solvent.pbcbox
+  #  verts0, normals, indices = cube_separate(flat=False)  # returns unit cube: (0..1,0..1,0..1)
+  #  vertices = np.dot(verts0, np.diag(mol.pbcbox)) - 0.5*solvent.pbcbox
   #  # for a general transformation, we'd need to apply to normals then renormalize
   #  cubemol = Bunch(r=vertices, normals=normals, colors=[(255, 0, 0, 127)], indices=indices)
   #  vis = Chemvis([ Mol(mol, [ VisGeom(style='licorice') ]), Mol(cubemol, [VisTriangles()]) ]).run()

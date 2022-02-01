@@ -17,6 +17,7 @@ from .glutils import *
 #  threading=False); soln for now is to use user_finish callback to clear children in chemvis for GC
 
 class GLFWViewer:
+  inited = False
 
   def __init__(self, camera, bg_color=(255,255,255,255)):
     """ callbacks to be set by caller after creating GLFWViewer object: user_on_key, user_on_click,
@@ -40,7 +41,9 @@ class GLFWViewer:
       glfwShowWindow(self.window)
       return
     # Shaders will not compile without a current GL context
-    glfwInit()
+    if not GLFWViewer.inited:
+      glfwInit()
+      GLFWViewer.inited = True
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
     # this disables deprecated functionality

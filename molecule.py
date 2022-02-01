@@ -162,7 +162,7 @@ class Molecule:
         mmconnect=[idx_map[ii] for ii in self.atoms[ii].mmconnect if ii in idx_map]) for ii in atom_idxs]
     residues = [setattrs(copy.copy(self.residues[ii]),
         atoms=[idx_map[ii] for ii in self.residues[ii].atoms if ii in idx_map]) for ii in resnums]
-    return Molecule(atoms, residues)
+    return Molecule(atoms, residues, pbcbox=self.pbcbox)
 
 
   def remove_atoms(self, sel):
@@ -283,22 +283,22 @@ class Molecule:
   # There's no reason to use calc_bond/angle - the calculations are one-liners
   # See: MMTK InternalCoordinates.py
 
-  ## TODO: use set() instead of list here!
-  def partition_mol(self, a1, a2, only2=False):
+  def partition(self, a1, a2, only2=False):
     # optimization ... unless a2 connected to other atoms - then we need full partition to check for errors
     if only2 and (not self.atoms[a2].mmconnect or self.atoms[a2].mmconnect == [a1]):
       return [], [a2]
     # we include other atom in list to accomplish isolation, then remove after fragment is built
-    f1 = self.buildfrag(a1, [ a2 ])[1:]
-    f2 = self.buildfrag(a2, [ a1 ])[1:]
+    # if we want to preserve order for some reason, use dict() instead of set()
+    f1 = self.buildfrag(a1, set([a2])) - set([a2])  #[1:]
+    f2 = self.buildfrag(a2, set([a1])) - set([a1])  #[1:]
     # make sure intersection is empty
-    assert len([x for x in f1 if x in f2]) == 0,\
+    assert not f1.intersection(f2), \
       "Unable to partition molecule; is (%d, %d) bond part of cyclic structure?" % (a1, a2)
-    return f1, f2
+    return list(f1), list(f2)
 
 
   def buildfrag(self, ii, frag):
-    frag.append(ii)
+    frag.add(ii)
     for jj in self.atoms[ii].mmconnect:
       if jj not in frag:
         self.buildfrag(jj, frag)
@@ -321,7 +321,7 @@ class Molecule:
     bondvec = self.atoms[bond[1]].r - self.atoms[bond[0]].r
     oldlen = norm(bondvec)
     if newlen is not None:
-      f1, f2 = self.partition_mol(bond[0], bond[1], only2=True) if move_frag else ([], [bond[1]])
+      f1, f2 = self.partition(bond[0], bond[1], only2=True) if move_frag else ([], [bond[1]])
       # translation vector
       delta = (newlen - (not rel and oldlen or 0))
       deltavec =  delta*bondvec/oldlen
@@ -346,7 +346,7 @@ class Molecule:
     # result is in radians (pi - converts to interior bond angle)
     olddeg = np.pi - np.arccos(np.dot(v12, v23))
     if newdeg is not None:
-      f1, f2 = self.partition_mol(angle[1], angle[2], only2=True)
+      f1, f2 = self.partition(angle[1], angle[2], only2=True)
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
       rotmat = rotation_matrix(np.cross(v23, v12), delta)
       rotcent = self.atoms[angle[1]].r
@@ -366,7 +366,7 @@ class Molecule:
     v1, v2, v3, v4 = [self.atoms[a].r for a in dihed]
     olddeg = calc_dihedral(v1, v2, v3, v4)
     if newdeg is not None:
-      f1, f2 = self.partition_mol(dihed[1], dihed[2]) if incl3 else self.partition_mol(dihed[2], dihed[3], only2=True)
+      f1, f2 = self.partition(dihed[1], dihed[2]) if incl3 else self.partition(dihed[2], dihed[3], only2=True)
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
       rotmat = rotation_matrix(v2 - v3, -delta)
       rotcent = self.atoms[dihed[2]].r
@@ -401,6 +401,8 @@ class Molecule:
       return self.get_bonds()
     if attr == 'chains':
       return list(dict.fromkeys(res.chain for res in self.residues))  # preserves order (in python 3)
+    if attr == 'mmconnect':
+      return [ getattr(atom, attr) for atom in self.atoms ]  # numpy complains about ragged array
     #if self.atoms and hasattr(self.atoms[0], attr):  # infinite loop if self.atoms not set
     if attr in self._atomattrs:
       return np.array([ getattr(atom, attr) for atom in self.atoms ])
@@ -619,7 +621,7 @@ def select_atoms(mol, sel=None, sort=None, pdb=None):
 def res_select(mol, res, atoms, squash=False):
   """ select atoms with names in `atoms` (['A','B',...] or 'A,B,...') from residue `res` in Molecule `mol` """
   atoms = [a.strip() for a in (atoms.split(',') if type(atoms) is str else atoms)]
-  res = mol.residues[res] if type(res) is int else res
+  res = mol.residues[res] if type(res) is int else mol.atomres(mol.select(res)[0]) if type(res) is str else res
   hits = [next((ii for ii in res.atoms if mol.atoms[ii].name == a), None) for a in atoms]
   return [h for h in hits if h is not None] if squash else hits
 

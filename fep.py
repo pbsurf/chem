@@ -15,9 +15,10 @@ from .basics import *
 #  set charges with RESP, then write all params to Tinker .key
 
 # if we install Psi4, try github.com/lilyminium/psiresp or github.com/cdsgroup/resp or github.com/psi4/psi4numpy
-def resp_prepare(mol, constr=[], avg=[]):
+def resp_prepare(mol, constr=[], avg=[], netcharge=0.0, maxiter=1000):
   """ run HF/6-31G* ESP charge fitting with restraints toward q = 0 on znuc > 1 atoms, with sets of atoms
-    `constr` constrained to have same charge and charges of sets of atoms `avg` made equal by averaging after fit
+    `constr` constrained to have same charge and charges of sets of atoms `avg` made equal by averaging after
+    fit; molecule is first relaxed for up to maxiter iterations
   """
   from .molecule import init_qmatoms
   from .opt.optimize import moloptim
@@ -26,14 +27,16 @@ def resp_prepare(mol, constr=[], avg=[]):
   # RESP charges
   qmbasis = '6-31G*'  # standard basis for RESP
   qmatoms = init_qmatoms(mol, '*', qmbasis)
-  qmmm = QMMM(mol, qmatoms=qmatoms, prefix='no_logs')
-  res, r_qm = moloptim(qmmm.EandG, mol=mol)
-  mol.r = r_qm
-  _, _, scn = pyscf_EandG(mol, r=r_qm)
-  mmq = resp(scn.base, equiv=constr, restrain=(mol.znuc > 1)*0.1)
+  if maxiter > 0:
+    qmmm = QMMM(mol, qmatoms=qmatoms, qm_charge=netcharge, prefix='no_logs')
+    res, r_qm = moloptim(qmmm.EandG, mol=mol, raiseonfail=False, maxiter=maxiter)
+    mol.r = r_qm
+  _, _, scn = pyscf_EandG(mol, qm_charge=netcharge)
+  mmq = resp(scn.base, equiv=constr, restrain=(mol.znuc > 1)*0.1, netcharge=netcharge)
   for a in avg:
     mmq[a] = np.mean(mmq[a])  # average charges of chemically equiv. atoms
   mol.mmq = mmq
+  mol.prev_pyscf = scn
   return mol
 
 
@@ -53,7 +56,7 @@ def gaff_prepare(mol, constr=[], avg=[], mmtype0=801):
 def solvate_prepare(mol, ff, T0, pad=6.0, solute_res=None, solvent_chain=None, neutral=False, eqsteps=5000):
   from .molecule import Molecule, Atom
   from .model.prepare import water_box, solvate
-  from .io.openmm import openmm, openmm_MD_context, UNIT
+  from .io.openmm import openmm, openmm_MD_context, openmm_load_params, UNIT
   # make a cubic water box
   side = np.max(np.diff(mol.extents(pad=pad), axis=0))
   solvent = water_box(side)
@@ -76,10 +79,11 @@ def solvate_prepare(mol, ff, T0, pad=6.0, solute_res=None, solvent_chain=None, n
 
   # short equilibriation (now using OpenMM instead of Tinker)
   solvated.r = solvated.r + 0.5*side  # OpenMM centers box at side/2 instead of origin
-  if eqsteps:
+  if eqsteps is not None:
     ctx = openmm_MD_context(solvated, ff, T0)
     openmm.LocalEnergyMinimizer.minimize(ctx, maxIterations=100)
-    ctx.getIntegrator().step(eqsteps)
+    if eqsteps > 0:
+      ctx.getIntegrator().step(eqsteps)
     simstate = ctx.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)
     solvated.r = simstate.getPositions(asNumpy=True).value_in_unit(UNIT.angstrom)
     solvated.pbcbox = np.diag(simstate.getPeriodicBoxVectors(asNumpy=True).value_in_unit(UNIT.angstrom))

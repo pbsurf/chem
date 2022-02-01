@@ -167,7 +167,7 @@ def openmm_mc(ctx, T0, nsteps, sampsteps=100):
 
 
 
-ff = openmm_app.ForceField('amber99sb.xml', 'tip3p.xml')
+ff = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml')
 
 T0 = 300  # Kelvin
 filename = '1MCT'  #_A'
@@ -320,6 +320,16 @@ d = np.sum(np.linalg.norm(dr - np.round(dr/mol.pbcbox)*mol.pbcbox, axis=2), axis
 # find waters that aren't moving much ... all near protein as expected
 stillwater = [ii for ii in np.argsort(d) if mol.atoms[ii].znuc == 8 and mol.atomres(ii).name == 'HOH']
 
+if 0:
+  # dist from stillwaters to protein (for a random frame)
+  from scipy.spatial.ckdtree import cKDTree
+  r = Rs[100]
+  kd = cKDTree(r[selAI])
+  dists, locs = kd.query(r[stillwater], k=[2])
+  # MM-GBSA binding energy of stillwaters to protein ... closest waters mosly have dE_binding < 0, while others
+  #  consistently have ~0.1
+  stillres = [mol.atoms[ii].resnum for ii in stillwater]
+  np.mean([dE_binding(mol, ffgbsa, selAI, mol.residues[res].atoms, r=Rs[::20]) for res in stillres[:100:10]], axis=1)
 
 
 ## Examine distribution of energies and RMSDs (cross? to initial?) for different sampling techniques
@@ -379,6 +389,7 @@ write_hdf5('mc2.h5', Rs=Rs, Es=Es)
 # NEXT:
 # - go over papers, make notes on entropy for restraints and MM-PBSA
 # ... recent review: https://www.frontiersin.org/articles/10.3389/fmolb.2021.712085/full#B177
+# - http://getyank.org/latest/algorithms.html
 
 # - get very basic ligand binding FEP working
 #  - test restraint w/ fully decoupled LIG (first try no restraint); try Boresch if we need orientational restraint?
@@ -386,10 +397,15 @@ write_hdf5('mc2.h5', Rs=Rs, Es=Es)
 #  - Boresch - see github.com/choderalab/yank/blob/master/Yank/restraints.py
 #  - free energy corrections for restraints: github.com/choderalab/openmmtools/blob/master/openmmtools/forces.py
 
+# Acceleration/enhanced sampling:
+# - metadynamics (turn on potentials to push away from current phase space position): https://www.cp2k.org/howto:biochem_qmmm
+# - attach-pull-release (like it sounds?): https://github.com/slochower/pAPRika
+# - replica exchange - run multiple simulations at different temperatures, periodically exchange coords between instances w/ Metropolis acceptance criteria; 10.3390/e16010163
+# - umbrella sampling
+
 # issues we won't pursue for now:
 # - what's going on with HMC ... do we just need to run for much longer???
 #  - https://github.com/kyleabeauchamp/openmmtools/blob/hmc/openmmtools/hmc_integrators.py
-# - enhanced sampling techniques: most common method seems to be replica exchange - run multiple simulations at different temperatures, periodically exchange coords between instances w/ Metropolis acceptance criteria; 10.3390/e16010163
 
 
 

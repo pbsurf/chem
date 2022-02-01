@@ -1,10 +1,10 @@
-import logging
+import logging, io, pickle
 import numpy as np
 
 from ..basics import *
 from ..molecule import Molecule, Residue, guess_bonds, center_of_mass
 from .pdb import parse_pdb, copy_residues, write_pdb
-from .tinker import parse_xyz, write_xyz, write_tinker_xyz, load_tinker_params, make_tinker_key
+from .tinker import parse_xyz, parse_mol2, write_xyz, write_tinker_xyz, load_tinker_params, make_tinker_key
 
 
 def cclib_open(filename):
@@ -20,6 +20,8 @@ def load_molecule(file, postprocess=None, center=False, charges=False, residue=N
   fileext = filename.split('.')[-1].lower() if filename is not None else ''
   if fileext == 'pdb' or file.startswith('HEADER'):
     mol = parse_pdb(file, **kwargs)
+  elif fileext == 'mol2' or file.startswith("@<TRIPOS>MOLECULE"):
+    mol = parse_mol2(file)
   elif fileext.startswith('xyz') or file[0:file.find('\n')].split()[0].isdigit():
     mol = parse_xyz(file)  #, **kwargs)
     if charges:
@@ -34,7 +36,7 @@ def load_molecule(file, postprocess=None, center=False, charges=False, residue=N
     mol.cclib = mol_cc
   mol.filename = filename
   if center:
-    mol.r = mol.r - center_of_mass(mol)
+    mol.r = mol.r - center_of_mass(mol)  # or mol.r - np.mean(mol.extents(), axis=0)?
   if residue:
     mol.set_residue(residue)
   return postprocess(mol) if callable(postprocess) else mol
@@ -86,3 +88,59 @@ def read_hdf5(filename, *args):
     except: return dset[...]
   with h5py.File(filename, 'r') as h5f:  # .value not longer available :-(
     return tuple(str_fix(h5f.get(key)) for key in args) if len(args) > 1 else str_fix(h5f.get(args[0]))
+
+
+# zip container: xyz for Molecule, arc for list of Molecules, numpy npy (includes pickle) for everything else
+# - why vs. pickling Molecule? human readable, smaller, safe against changes to Molecule class
+# - read_zip/write_zip in basics are lower level
+# - hopefully this will become our "one true format" and we can eliminate hdf5, etc.
+
+def _load_zip_entry(zf, name, contents):
+  if name + '.npy' in contents:
+    return np.load(io.BytesIO(zf.read(name + '.npy')))
+  if name + '.pkl' in contents:
+    return pickle.loads(zf.read(name + '.pkl'))
+  if name + '.xyz' in contents:
+    return load_molecule(zf.read(name + '.xyz').decode('utf-8'))
+  if name + '.arc' in contents:
+    f = io.StringIO(zf.read(name + '.arc').decode('utf-8'))
+    mols = []
+    while 1:  #while m := parse_xyz(f) is not None:
+      m = parse_xyz(f)
+      if m is None:
+        return mols
+      mols.append(m)
+  print("%s.(npy/pkl/xyz/arc) not found in zip file!" % name)
+  return None
+
+
+# kwargs for custom loaders? ... a,b,c = load_zip('file.zip', a=np.load, b=np.load, c=load_molecule)
+def load_zip(filename, *args):
+  from zipfile import ZipFile
+  with ZipFile(filename, 'r') as zf:
+    cts = frozenset(zf.namelist())
+    if not args:
+      return Bunch([ (f[:-4], _load_zip_entry(zf, f[:-4], cts)) for f in zf.namelist() ])
+    if len(args) == 1:
+      return _load_zip_entry(zf, args[0], cts)
+    return tuple(_load_zip_entry(zf, a, cts) for a in args)
+
+
+#def write_arc(mols):  return ''.join([write_xyz(m) for m in mols])  # that's it!
+def _save_zip(filename, kwargs, mode):
+  from zipfile import ZipFile, ZIP_DEFLATED
+  with ZipFile(filename, mode, ZIP_DEFLATED) as zf:
+    for k,v in kwargs.items():
+      if type(v) is Molecule:
+        zf.writestr(k + '.xyz', write_xyz(v))
+      elif safelen(v) > 0 and type(v[0]) is Molecule:
+        # no blank lines in .arc; write_xyz includes trailing \n
+        zf.writestr(k + '.arc', ''.join([write_xyz(m) for m in v]))
+      elif type(v).__module__ == np.__name__:
+        with zf.open(k + '.npy', 'w') as npyf:
+          np.save(npyf, v)
+      else:  # np.save would either convert to numpy array or pickle anyway
+        zf.writestr(k + '.pkl', pickle.dumps(v))
+
+def save_zip(filename, **kwargs):
+  _save_zip(filename, kwargs, mode='x')

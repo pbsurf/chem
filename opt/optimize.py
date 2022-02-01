@@ -49,18 +49,22 @@ def coordwrap(fn, coords, reinit=True, **kwargs0):
 
 # default gtol, ftol just copied from scipy L-BFGS options
 def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05, ftol=2E-09, optimizer=None,
-    mon=moloptim_mon, vis=None, raiseonfail=True, verbose=True, maxiter=1000):
+    mon=moloptim_mon, vis=None, raiseonfail=True, verbose=0, maxiter=1000):
   """ Given `fn` accepting r array and additional args `fnargs` and returning energy and gradient of energy,
     find r which minimizes energy, starting from `r0`.  Internal coordinates, e.g., can use used by passing
     appropriate object for `coords`; if coords are already inited, initial point can be set by S0 instead of
     r0. `verbose`=1: print every iteration; 0: call `mon` every iter, print optimization status at start and
-    finish; -1: only call `mon` (every iteration); -2: only call `mon` at start and finish
+    finish; -1: only call `mon` (every iteration); -2: only call `mon` at start and finish; < -2: silent. If
+    `raiseonfail` is True (default), exception will be raised if optimization finishes without reaching gtol,
+    ftol, or maxiter (pass raiseonfail='all' to raise on reaching maxiter)
   """
   if S0 is not None:
     assert r0 is None, "Cannot pass both r0 and S0"
     coords.update(S0)
     r0 = np.array(coords.xyzs())
   else:
+    if hasattr(r0, 'atoms'):  #type(r0) is Molecule:
+      mol, r0 = r0, r0.r
     r0 = mol.r if r0 is None else r0
     coords = XYZ(r0) if coords is None else coords
     coords.init(r0)
@@ -80,7 +84,7 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
       # idea of Gc is to get cartesian grad excluding constraints
       Gc = coords.gradtoxyz(gS) if hasattr(coords, 'gradtoxyz') else gS  #np.zeros(1)
       # call monitor fn, e.g. to print additional info
-      if mon and (verbose >= -1 or objst.neval == 0):
+      if mon and verbose >= -2 and (verbose >= -1 or objst.neval == 0):
         mon(r, r0, E, G, Gc, dict(objst, coords=t1-t0, calc=t2-t1, total=t2-t0))
       if vis:
         vis.refresh(r=r, repaint=True)
@@ -116,12 +120,12 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
 
   if verbose > 0:
     print("optimize finished at %s" % time.asctime())
-  elif verbose < -1 and mon:
+  elif verbose == -2 and mon:
     verbose = -1
     objfn(res.x)
   if res and res.success:
     coords.update(res.x)
-  elif raiseonfail:
+  elif raiseonfail and (res.nit < maxiter or raiseonfail == 'all'):
     raise ValueError('optimize() failed')
   return res, np.array(coords.xyzs())  # copy
 

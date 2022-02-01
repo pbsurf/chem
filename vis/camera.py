@@ -104,7 +104,7 @@ class Camera:
     z_far = -np.amin(view_corners, 0)[2]
     # maximum allowed range
     self.z_near = max(self.min_z_near, z_near)
-    self.z_far = min(self.z_near + 1e3, z_far)
+    self.z_far = min(self.z_near + 1e3, max(self.z_near + 0.01, z_far))  # must have z_far > z_near
 
 
   def proj_matrix(self):

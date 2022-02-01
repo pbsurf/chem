@@ -142,8 +142,8 @@ def gradoptim(fn, x0, stepper=None, gtol=1E-05, ftol=2E-09, wolfe1=1e-4, wolfe2=
     stepper: object with method step(dr, gradient) -> next dr; defaults to LBFGS Hessian update
     gtol: optimization terminated if max(abs(G)) < gtol
     ftol: optimization terminated if abs(delta f)/f < ftol (if ftol > 0)
-    wolfe1: constant for first Wolfe condition: f(r0 + dr) < wolfe1*g0.*step (ignored unless ftol > 0)
-    wolfe2: constant for second Wolfe condition: abs(g.*step) < wolfe2*abs(g0.*step)
+    wolfe1: constant for first Wolfe condition: f(r0 + dr) < f(r0) + wolfe1*g0.*dr (ignored unless ftol > 0)
+    wolfe2: constant for second Wolfe condition: abs(g.*dr) < wolfe2*abs(g0.*dr)
     maxiter: maximum number of iterations (== maximum number of fn evaluations)
     maxdr: largest allowed step for any single component
   """

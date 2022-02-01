@@ -31,22 +31,23 @@ cd $CHEM
 echo "export CHEM=$CHEM" >> $HOME/.localrc
 
 # conda python:
-# conda is slow, esp. w/ conda-forge channel - consider trying mamba
-conda install openmm "cudatoolkit<10"  # pick the smallest cuda version since cpu-only isn't available
-conda install openmmtools matplotlib pyopengl
-conda install openblas  # needed to build pyscf (libopenblas only provides the .so)
-#conda install ambertools openmmforcefields
-#conda install -c psi4/label/dev psi4=1.4rc1  # python 3.9 only supported in dev channel
-
-# Removing cudatoolkit: conda remove --force cudatoolkit, then delete the cudatoolkit lines from the depends
-#  sections in pkgs/openmm-<version>/info/repodata_record.json and conda-meta/openmm-<version>.json
+conda config --add channels conda-forge  # these modify ~/.condarc
+conda config --set channel_priority strict
+openmm install mamba  # mamba is much faster than conda
+# cudatoolkit: use channel with dummy package to prevent huge download; see github.com/openmm/openmm/issues/3059
+mamba install -c jaimergp/label/unsupported-cudatoolkit-shim openmm
+#conda install openmm "cudatoolkit<10"  # pick the smallest cuda version since cpu-only isn't available
+mamba install openmmtools matplotlib pyopengl
+mamba install openblas  # needed to build pyscf (libopenblas only provides the .so)
+mamba install ambertools #openmmforcefields
+#mamba install -c psi4/label/dev psi4=1.4rc1  # python 3.9 only supported in dev channel
 
 # fancier python prompt
-conda install rich pdbpp  #ptpython
+mamba install rich pdbpp  #ptpython
 
 # system python:
 ##$APTINST libopenblas-dev python-numpy python-scipy python-sympy #python-matplotlib
-#$APTINST libmkl-rt -- MKL now available via apt, but doesn't seem any faster than openblas
+#$APTINST libmkl-rt -- MKL now available via apt (and conda), but doesn't seem any faster than openblas
 
 #$APTINST nwchem
 #$APTINST pymol

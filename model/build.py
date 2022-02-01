@@ -22,7 +22,7 @@ def _download_build_data():
     os.system("wget https://ftp.wwpdb.org/pub/pdb/data/monomers/components.cif.gz && gunzip components.cif.gz")
   cif = []
   with open('components.cif') as f:
-    openmm_app.pdbxfile.PdbxReader(f).read(cif)
+    openmm.app.pdbxfile.PdbxReader(f).read(cif)
 
   with ZipFile('components.zip', 'w', ZIP_DEFLATED) as zip:
     for res in cif:
@@ -61,7 +61,7 @@ def load_compound(name):
   from zipfile import ZipFile
   with ZipFile(DATA_PATH + '/components.zip', 'r') as zip:
     try:
-      return load_molecule(zip.read(name).decode('utf-8'))
+      return load_molecule(zip.read(name).decode('utf-8'), center=True)
     except:
       return None
 
@@ -85,20 +85,22 @@ class PDB_RES_T:
     self._data, self._idx = None, None
 
   def _load(self):
-    from chem.io.openmm import openmm_app
+    import openmm.app
     cif = []
     with open(self.file) as f:
-      openmm_app.pdbxfile.PdbxReader(f).read(cif)
+      openmm.app.pdbxfile.PdbxReader(f).read(cif)
     self._data = { mol.header: mol for mol in (load_cif_res(res) for res in cif) }
     # NH2 cap for C-terminal to support lone residues w/ Amber99
     self._data['NME'] = load_molecule(NME_xyz, residue='NME')
     self._data['HOH'] = load_molecule(TIP3P_xyz, residue='HOH')
-    self._data['GLH'] = self._data['GLU']
+    self._data['GLH'] = self._data['GLU_LL']
     self._data['GLU'] = self._data['GLU_LL_DHE2']
-    self._data['ASH'] = self._data['ASP']
+    self._data['ASH'] = self._data['ASP_LL']
     self._data['ASP'] = self._data['ASP_LL_DHD2']
     self._data['HID'] = self._data['HIS_LL_DHE2']
     self._data['HIE'] = self._data['HIS_LL_DHD1']
+    self._data['LYN'] = self._data['LYS_LL_DHZ3']
+    self._data['ARN'] = self._data['ARG_LL_DHH22']
 
   def __call__(self, res=None):
     if self._data is None: self._load()
@@ -221,7 +223,7 @@ def mutate_residue(mol, resnum, newres):
   mol.remove_atoms([ii for ii in mol.residues[resnum].atoms if mol.atoms[ii].name not in bbnames])
   s1 = next(ii for ii in newres.atoms[newca].mmconnect if newres.atoms[ii].name not in ['HA','HA2','N','C'])
   schead = newres.atoms[s1].name
-  notsc, sc = newres.partition_mol(newca, s1)
+  notsc, sc = newres.partition(newca, s1)
   newres.remove_atoms(notsc)
   mol.append_atoms(newres, residue=resnum)
   mol.add_bonds(res_select(mol, resnum, 'CA,%s' % schead))

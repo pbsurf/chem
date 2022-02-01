@@ -1,5 +1,5 @@
 # In the simplest case, ESP charge fitting is just a linear least squares problem
-# ESP at r_j due to point charges q_i at R_i:
+# ESP at r_j due to point charges q_i at R_i (*in Bohr*):
 #  phiq(r_j) = \sum_i A_ji q_i, w/ A_ji = 1/(r_j - R_i)
 # Least squares:
 #  chi^2 = \sum_j w_j*(phiq(r_j) - phi0(r_j))^2, where phi0(r_j) is input points/grid, w_j is weight
@@ -77,18 +77,18 @@ def grid_resp(centers, grid, phi0, gridweight=None, restrain=None, netcharge=0.0
     phi0 = np.ravel(phi0)
   else:
     dr = grid[:,None,:] - centers[None,:,:]
-  ncenters = len(centers);
-  npoints = len(phi0);
+  ncenters = len(centers)
+  npoints = len(phi0)
   # ESP points (restraints)
-  A = 1.0/np.sqrt(np.sum(dr*dr, axis=2))
+  A = ANGSTROM_PER_BOHR/np.sqrt(np.sum(dr*dr, axis=2))  # unbelievable
   # ESP point weighting - weighting is applied to A and phi0 before main calculation; alternatively, we could
   #  form a weight matrix which multiples A and phi0 in main calc.
   if gridweight == 'equal':
-    A = 1.0/phi0 * A;
-    phi0 = np.ones_like(phi0);
+    A = 1.0/phi0 * A
+    phi0 = np.ones_like(phi0)
   elif gridweight is not None:
-    A = gridweight * A;
-    phi0 = gridweight * phi0;
+    A = gridweight * A
+    phi0 = gridweight * phi0
   # charge restraints - idea is to prevent excess charge on poorly determined interior atoms
   if restrain is not None:
     Ar = np.eye(ncenters)*restrain if np.isscalar(restrain) else np.diag(restrain)
@@ -98,8 +98,8 @@ def grid_resp(centers, grid, phi0, gridweight=None, restrain=None, netcharge=0.0
   # constraints: B, and c
   B, c = [], []
   #if netcharge is not None:
-  B.append( np.ones(ncenters) );
-  c.append( netcharge );
+  B.append( np.ones(ncenters) )
+  c.append( netcharge )
   equivpairs = [[a,b] for eqv in equiv for ii,a in enumerate(eqv) for b in eqv[ii+1:]]
   for eqv in equivpairs:
     B.append(setitem(np.zeros(ncenters), eqv, [1,-1]))  #list(eqv) -- list() no longer needed
@@ -123,7 +123,7 @@ def grid_resp(centers, grid, phi0, gridweight=None, restrain=None, netcharge=0.0
     chisq = np.dot(eps.T, eps)
     print("RESP fit: reduced chi-squared = %f; rel. RMS error = %f" % (
         chisq/(npoints - ncenters), np.sqrt(chisq/np.sum(phi0[:npoints]**2)) ))
-  return q;
+  return q
 
 
 def MPinv(A, rcond=1e-15):
@@ -141,9 +141,9 @@ def MPinv(A, rcond=1e-15):
 
 
 # "Merz-Kollman" vdW radii from FMOPRP in GAMESS fmoio.src
-MK_VDW_RADII = {1:1.2, 6:1.5, 7:1.5, 8:1.4, 11: 1.57, 12: 1.36, 15: 1.80, 16: 1.75, 17: 1.70}
+MK_VDW_RADII = {1: 1.2, 6: 1.5, 7: 1.5, 8: 1.4, 11: 1.57, 12: 1.36, 15: 1.80, 16: 1.75, 17: 1.70}
 
-# CHELPG uses eliminates points within VdW radius or outside 2.8 A, but I think I'll use 2*VdW instead
+# CHELPG eliminates points within VdW radius or outside 2.8 A, but I think I'll use 2*VdW instead
 def chelpg_grid(r, znuc, density=5.0, random=False, minr=1.0, maxr=2.0):
   """ generate cubic grid (or randomly placed points if `random` == True) with `density`**3 points per Ang**3
     between `minr` and `maxr` times VdW radii of atoms with atomic number `znuc` at positions `r`
@@ -213,13 +213,14 @@ def connolly_mk_grid(r, znuc, nshells=4, density=1.0):
 
 # to restrain only heavy atoms (the usual case):  restrain=(mol.znuc > 1)*0.1
 
-def resp(mf, **kwargs):
+def resp(mf, verbose=True, **kwargs):
   """ RESP charge fit based on pyscf QM result `mf` """
   r = mf.mol.atom_coords(unit='Ang')
-  #netcharge = np.sum(mol.mmq) if netcharge is None else netcharge
   grid = chelpg_grid(r, mf.mol.atom_charges())
   esp = pyscf_esp_grid(mf, grid)
-  return grid_resp(r, grid, esp, **kwargs)
+  if verbose:
+    print("Compare Mulliken charges:\n%r" % mf.mulliken_pop(verbose=0)[1])
+  return grid_resp(r, grid, esp, verbose=verbose, **kwargs)
 
 
 # multiple conformations

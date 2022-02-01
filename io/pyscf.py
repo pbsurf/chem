@@ -5,6 +5,7 @@ from ..data.elements import ELEMENTS
 from ..basics import ANGSTROM_PER_BOHR
 
 # pyscf 1.7.5/6 overwrites time.time w/ time.perf_counter!
+import time
 assert time.time is not time.perf_counter, "Fix pyscf/lib/logger.py"
 
 # from https://github.com/pyscf/pyscf/blob/master/examples/qmmm/30-force_on_mm_particles.py

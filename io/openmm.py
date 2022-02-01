@@ -1,6 +1,6 @@
-import simtk.openmm as openmm
-import simtk.openmm.app as openmm_app
-import simtk.unit as UNIT
+import openmm
+import openmm.app #as openmm_app
+import openmm.unit as UNIT
 from ..basics import *
 from ..molecule import Residue
 
@@ -10,13 +10,13 @@ OPENMM_qqkscale = 332.06371335990205/(ANGSTROM_PER_BOHR*KCALMOL_PER_HARTREE)  # 
 def openmm_top(mol):
   """ generate OpenMM topology from chem Molecule """
   assert len(mol.residues) > 0, "Residues required to created OpenMM topology"
-  top = openmm_app.Topology()
+  top = openmm.app.Topology()
   # preserve order of chains (Python 3.7+ - use OrderedDict for Python 2)
   chains = list(dict.fromkeys(res.chain for res in mol.residues))  #set()
   topchn = {chain: top.addChain(chain) for chain in chains}
   topres = [top.addResidue(res.name, topchn[res.chain]) for res in mol.residues]
   topatm = [top.addAtom(a.name,
-      openmm_app.Element.getByAtomicNumber(a.znuc), topres[a.resnum or 0]) for a in mol.atoms]
+      openmm.app.Element.getByAtomicNumber(a.znuc), topres[a.resnum or 0]) for a in mol.atoms]
   for a1,a2 in mol.get_bonds():
     top.addBond(topatm[a1], topatm[a2])
   if mol.pbcbox is not None:
@@ -46,6 +46,7 @@ def openmm_resff(mol, residues=None):
 
 
 def openmm_make_inactive(mol, sys, inactive):
+  """ disable bonded and 1-4 vdW interactions involving only atoms in `inactive` and set charges to zero """
   inactive = sorted(inactive)
   forces = {f.__class__: f for f in sys.getForces()}
   bndforce, angforce, torforce, nbforce = forces[openmm.HarmonicBondForce], \
@@ -81,7 +82,7 @@ def openmm_make_inactive(mol, sys, inactive):
 
 # vdw works for AMBER but not CHARMM, which uses custom non-bonded force for LJ
 def openmm_load_params(mol, sys=None, ff=None, charges=True, vdw=False, bonded=False):
-  sys = ff.createSystem(openmm_top(mol), nonbondedMethod=openmm_app.NoCutoff) if sys is None else sys
+  sys = ff.createSystem(openmm_top(mol), nonbondedMethod=openmm.app.NoCutoff) if sys is None else sys
   forces = {f.__class__: f for f in sys.getForces()}
   bndforce, angforce, torforce, nbforce = forces[openmm.HarmonicBondForce], \
       forces[openmm.HarmonicAngleForce], forces[openmm.PeriodicTorsionForce], forces[openmm.NonbondedForce]
@@ -108,13 +109,13 @@ def openmm_load_params(mol, sys=None, ff=None, charges=True, vdw=False, bonded=F
 
 
 def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, **kwargs):
-  sysargs = dict(dict(nonbondedMethod=openmm_app.PME, constraints=openmm_app.HBonds), **kwargs)
-  system = ff.createSystem(openmm_top(mol), **sysargs)
+  sysargs = dict(dict(constraints=openmm.app.HBonds), **kwargs)  #nonbondedMethod=openmm.app.PME,
+  sys = ff.createSystem(openmm_top(mol), **sysargs)
   if p0 is not None:
-    system.addForce(openmm.MonteCarloBarostat(p0*UNIT.bar, T0*UNIT.kelvin))
+    sys.addForce(openmm.MonteCarloBarostat(p0*UNIT.bar, T0*UNIT.kelvin))
   if intgr is None:
     intgr = openmm.LangevinMiddleIntegrator(T0*UNIT.kelvin, 1/UNIT.picosecond, dt*UNIT.femtoseconds)
-  ctx = openmm.Context(system, intgr)
+  ctx = openmm.Context(sys, intgr)
   ctx.setPositions(mol.r*UNIT.angstrom)
   ctx.setVelocitiesToTemperature(T0*UNIT.kelvin)
   if mol.pbcbox is not None:
@@ -123,9 +124,9 @@ def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, **kwargs):
 
 
 # for tracking down "Particle coordinate is nan" error
-def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vis=None):
-  """ Run OpenMM context `ctx` for `nsteps` and return position, energy, and, optionally, gradient recorded
-    every sampsteps
+def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vis=None, verbose=1):
+  """ Run OpenMM context `ctx` for `nsteps` and return position, potential energy, and, optionally, gradient
+    recorded every sampsteps
   """
   intgr = ctx.getIntegrator()  #sys = ctx.getSystem()
   Es, Rs, Gs = [], [], []
@@ -141,22 +142,27 @@ def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vis=None):
         Gs.append(-state.getForces(asNumpy=True)/(EUNIT/UNIT.angstrom))
       if vis:
         vis.refresh(r=Rs[-1], repaint=True)
+      if verbose > 0:
+        print('.', end='', flush=True)
   except (KeyboardInterrupt, Exception) as e:
     print("openmm_dynamic terminated by exception: ", e)
+  print('')
   return (np.asarray(Rs), np.asarray(Es), np.asarray(Gs)) if grad else (np.asarray(Rs), np.asarray(Es))
 
 
 # OpenMM doesn't support Hessian calculations; see github.com/leeping/forcebalance/blob/master/src/openmmio.py
 #  for Hessian calc via finite differencing; also see github.com/Hong-Rui/Normal_Mode_Analysis
 
-def openmm_EandG_context(mol, ff=None, inactive=None, charges=None, **kwargs):
-  """ create an OpenMM context for single point energy and gradient calculations """
-  sysargs = dict(dict(nonbondedMethod=openmm_app.NoCutoff), **kwargs)
-  ff = openmm_app.ForceField('amber99sb.xml', 'tip3p.xml') if ff is None else ff
-  sys = ff.createSystem(openmm_top(mol), **sysargs)
+def openmm_EandG_context(mol, ff=None, inactive=None, charges=None, epsilons=None, **kwargs):
+  """ create an OpenMM context for single point energy and gradient calculations for `mol` using force field
+    `ff` (default Amber99sb); `inactive` atoms are made inactive (see openmm_make_inactive); charges, vdW
+     epsilon parameters overridden by lists of (atom number, value) pairs `charges`, `epsilons`
+  """
+  #sysargs = dict(dict(nonbondedMethod=openmm.app.NoCutoff), **kwargs)
+  ff = openmm.app.ForceField('amber99sb.xml', 'tip3p.xml') if ff is None else ff
+  sys = ff.createSystem(openmm_top(mol), **kwargs)
   for ii,f in enumerate(sys.getForces()):
     f.setForceGroup(ii)
-  #openmm_load_params(mol, sys)  # should we do this after overriding charges?
   if inactive is not None:
     openmm_make_inactive(mol, sys, inactive)
   if charges is not None:
@@ -164,16 +170,21 @@ def openmm_EandG_context(mol, ff=None, inactive=None, charges=None, **kwargs):
     for ii,q in charges:
       _, sigma, epsilon = nbforce.getParticleParameters(ii)
       nbforce.setParticleParameters(ii, q, sigma, epsilon)
+  if epsilons is not None:
+    nbforce = next(force for force in sys.getForces() if type(force) == openmm.NonbondedForce)
+    for ii,eps in epsilons:
+      q, sigma, _ = nbforce.getParticleParameters(ii)
+      nbforce.setParticleParameters(ii, q, sigma, eps)
   # integrator required to create Context
   intgr = openmm.VerletIntegrator(1.0*UNIT.femtoseconds)
   return openmm.Context(sys, intgr)
 
 
-def openmm_EandG(mol, r=None, ff=None, ctx=None, inactive=None, charges=None, grad=True, components=None): #noconnect=None,
+def openmm_EandG(mol, r=None, ff=None, ctx=None, grad=True, components=None, **kwargs): #noconnect=None,
   if ctx is None:
-    ctx = openmm_EandG_context(mol, ff, inactive, charges)
+    ctx = openmm_EandG_context(mol, ff, **kwargs)
   else:
-    assert ff is None and inactive is None and charges is None, "Cannot specify ff, inactive, or charges w/ ctx"
+    assert ff is None and not kwargs, "Cannot specify ff, inactive, charges, or other context params w/ ctx"
   ctx.setPositions((getattr(mol, 'r', mol) if r is None else r)*UNIT.angstrom)
   if components is not None:
     for ii,f in enumerate(ctx.getSystem().getForces()):
@@ -188,14 +199,25 @@ def openmm_EandG(mol, r=None, ff=None, ctx=None, inactive=None, charges=None, gr
 
 
 class OpenMM_EandG:
-  def __init__(self, mol, ff=None, inactive=None, charges=None):
-    self.ctx = openmm_EandG_context(mol, ff, inactive, charges)
+  def __init__(self, mol, ff=None, inactive=None, charges=None, **kwargs):
+    self.ctx = openmm_EandG_context(mol, ff, inactive, charges, **kwargs)
     self.inactive, self.charges = inactive, charges
 
   def __call__(self, mol, r=None, inactive=None, charges=None, grad=True, components=None):
     if inactive is not None or charges is not None:
       assert inactive == self.inactive and charges == self.charges, "charges and inactive cannot be changed!"
     return openmm_EandG(mol, r, ctx=self.ctx, grad=grad, components=components)
+
+
+# can't extend openmm.app.ForceField due to problem with use of inspect.signature() in ArgTracker
+class OpenMM_ForceField:  #(openmm.app.ForceField):
+  """ Wrapper class to override default args for ForceField.createSystem() """
+  def __init__(self, *args, **kwargs):
+    self.sysargs = kwargs
+    self.ff = openmm.app.ForceField(*args)  #super(OpenMM_ForceField, self).__init__(*args)
+
+  def createSystem(self, top, **kwargs):
+    return self.ff.createSystem(top, **dict(self.sysargs, **kwargs))  #super(OpenMM_ForceField, self)
 
 
 # replace nonbonded force of OpenMM system with custom nonbonded force for alchemical transformation

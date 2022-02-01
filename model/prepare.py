@@ -165,7 +165,7 @@ def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None, solute_res=None, solven
   retain = [ii for ii in range(len(solvent.residues)) if ii not in remove]
   solvent = solvent.extract_atoms(resnums=retain)
   if solvent_chain is not None:
-    assert solvent_chain not in solvated.get_chains(), "Solvent chain already in use!"
+    assert solvent_chain not in solvated.chains, "Solvent chain already in use!"
     for ii,res in enumerate(solvent.residues):
       res.pdb_num, res.chain = ii+1, solvent_chain
   solvated.append_atoms(solvent)

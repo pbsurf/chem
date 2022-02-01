@@ -74,8 +74,10 @@ def partial(f, *args, **kwargs):
   return newf
 
 
-# Not sure safelen() and islist() should be retained; note that len(x) > 0 doesn't assure that we can use
-#  numeric indexing
+# sorting out python lists/numpy lists/python scalars/numpy lists is a huge mess
+# - `x is int` (float): fails for numpy scalar types (e.g. numpy.int64)
+# - np.isscalar()/np.ndim(): would be preferable to have a general soln that doesn't require numpy
+# - safelen/islist(): is this the best way?  should we even keep these?  len(x) > 0 doesn't mean x[0] will work
 
 # test if list and get length in one call
 def safelen(x):
@@ -100,6 +102,25 @@ def read_only(*args):
   for a in args:
     a.flags.writeable = False
   return args
+
+
+def unique(x):
+  """ get unique items from iterable, preserving order """
+  #np.unique(x, axis=0).tolist()
+  return list(dict.fromkeys(x))
+
+
+#all_cycles = [list(dfs_path(mol.mmconnect, ii, ii)) for ii in mol.listatoms()]
+def dfs_path(graph, start, end):
+  """ generator yielding paths from start to end in graph; graph[i] is list of nodes with edge from node i """
+  fringe = [[start]]
+  while fringe:
+    path = fringe.pop()
+    for next_state in graph[path[-1]]:
+      if (start != end or len(path) > 2) and next_state == end:
+        yield path  #path + [end]
+      elif next_state not in path:
+        fringe.append(path+[next_state])
 
 
 # clock() doesn't seem to include time of any external processes run
@@ -154,7 +175,7 @@ def read_zip(filename, *args):
 # object returned by np.load("*.npz") must be closed, so we need this fn to do one-liners
 def load_npz(filename, *args):
   with np.load(filename) as npz:
-    return npz[args[0]] if len(args) == 1 else tuple(npz[a] for a in args)
+    return Bunch(npz) if len(args) == 0 else npz[args[0]] if len(args) == 1 else tuple(npz[a] for a in args)
 
 
 # not sure if we'll actually use this

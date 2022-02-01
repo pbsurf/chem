@@ -66,7 +66,7 @@ def pyscf_mo_grid(mf, extents, sample_density=10.0, mo_coeff=None, n_calc=None, 
   """
   homo = np.max(np.nonzero(mf.mo_occ))
   n_calc_mos = n_calc or 2*homo
-  max_eval = max_memory/mf.mol.nao_cart()/8  # nao_cart always >= nao_nr
+  max_eval = max_memory//mf.mol.nao_cart()**2//8  # nao_cart always >= nao_nr
   mo_coeff = mf.mo_coeff if mo_coeff is None else mo_coeff
   if density == 'valence':
     ncore = sum([znuc - nvalence(znuc) for znuc in mf.mol.atom_charges()])
@@ -93,9 +93,9 @@ def pyscf_mo_grid(mf, extents, sample_density=10.0, mo_coeff=None, n_calc=None, 
 
 
 # ref: github.com/pyscf/pyscf/blob/master/pyscf/tools/cubegen.py
-def pyscf_orbesp_grid(mf, grid):
-  """ calculate electrostatic potential from electrons for pyscf scf object `mf` over `grid` (Nx3) in Bohr """
-  max_eval = 65536 #max_memory/mf.mol.nao_cart()/8  # nao_cart always >= nao_nr
+def pyscf_orbesp_grid(mf, grid, max_memory=2**30):
+  """ calculate electrostatic potential from electrons for pyscf scf object `mf` over `grid` (Nx3) """
+  max_eval = max_memory//mf.mol.nao_cart()**2//8  # nao_cart always >= nao_nr
   dm = mf.make_rdm1()
   esp_grid = np.empty(len(grid))
   for start in range(0, len(grid), max_eval):
@@ -107,7 +107,7 @@ def pyscf_orbesp_grid(mf, grid):
 
 
 def pyscf_esp_grid(mf, grid):
-  """ calculate total electrostatic potential for pyscf scf object `mf` over `grid` (Nx3) in Bohr """
+  """ calculate total electrostatic potential for pyscf scf object `mf` over `grid` (Nx3) """
   return pyscf_orbesp_grid(mf, grid) + esp_grid(mf.mol.atom_charges(), mf.mol.atom_coords(unit='Ang'), grid)
 
 

@@ -25,7 +25,8 @@ class Chemvis:
   def __init__(self, children, effects=[], shading='phong', shadows=False, fog=False, bg_color=Color.black,
       wrap=False, timing=False, threaded=True, step_singles=False, drag_atoms=False, lock_orientation=False,
       refresh_sel=False, verbose=False):
-    """ create Chemvis instance, with list of Mol objects in `children`
+    """ create Chemvis instance, with list of Mol objects in `children`; can also pass tuple of Molecules to
+      display simultaneously or list of Molecules to display sequentially
       Options:
       - `wrap`: wrap to beginning of file lists when stepping
       - `bg_color`: window background color,
@@ -36,7 +37,7 @@ class Chemvis:
       - `lock_orientation`: keep "north-south" axis vertical when orbiting camera
       - `refresh_sel`: update selection to follow atom positions
     """
-    self.children = children if type(children) is list else [children]
+    self.children = children if safelen(children) > 0 else [children]
     self.wrap = wrap
     self.print_timing = timing
     self.threaded = threaded
@@ -58,6 +59,11 @@ class Chemvis:
     self.viewer.user_on_drag = self.on_drag
     self.viewer.user_draw = self.draw
     self.viewer.user_finish = self.on_finish
+
+    # support shortcuts for common use cases
+    if type(self.children[0]) is Molecule:
+      self.children = [Mol(c, [VisGeom()]) for c in self.children] \
+          if type(self.children) is tuple else [Mol(self.children, [VisGeom()])]
 
     # lighting config shared by geometry renderers
     if type(shading) is str:
@@ -123,7 +129,7 @@ IO: slower/faster animation
       selected = select_atoms(mol, sel, pdb=pdb)
       self.selection.extend([Bunch(mol=mol, r=r_array[ii], idx=ii,
           radius=(0.1 + ELEMENTS[mol.atoms[ii].znuc].vdw_radius) if radius == 'vdw' else radius,
-          color=color_fn(mol,ii), vismol=child) for ii in selected])
+          color=color_fn(mol,ii), vismol=child, visrdr=child.renderers[-1]) for ii in selected])
     # print bond/angle/dihed info for 2/3/4 atom selection
     if print_dim:
       if len(self.selection) == 2:
@@ -204,7 +210,7 @@ IO: slower/faster animation
 
     self.invisible_loaded = True
     # set terminal title
-    print("\x1B]0;%s (%s)\x07" % ('Python - Chemvis', os.getcwd()))
+    #print("\x1B]0;%s (%s)\x07" % ('Python - Chemvis', os.getcwd()))
     # TODO: better way to get autozoom r_array; also, crashes if no molecules yet!
     if self.initial_view is None:
       self.camera.autozoom(self.children[0].mol.r, min_dist=20)
@@ -282,7 +288,7 @@ IO: slower/faster animation
     hits = []
     for child in self.children:
       if child.visible and child.focused:
-        for vis in child.renderers:
+        for vis in child.renderers[::-1]:  # renderers drawn first to last, so select last to first
           if isinstance(vis, VisGeom) and getattr(vis, 'visible', True) and getattr(vis, 'focused', True):
             r_array = child.curr_r[vis.active] if vis.active is not None else child.curr_r
             selr = 1.0 if vis.style == 'spacefill' else 0.2  # H vdW radius is 1.1
@@ -294,7 +300,7 @@ IO: slower/faster animation
               if vis.style == 'spacefill':
                 radius = 0.1 + ELEMENTS[child.mol.atoms[atomidx].znuc].vdw_radius
               hits.append(Bunch(mol=child.mol, r=r_array[idxs[0]], idx=atomidx, radius=radius, vismol=child,
-                  color=self.sel_color, dist=dists[0]))
+                  visrdr=vis, color=self.sel_color, dist=dists[0]))
 
     if len(hits) > 0:
       hit = min(hits, key=lambda h: h.dist)  # pick closest
@@ -432,11 +438,14 @@ IO: slower/faster animation
         print("  %d: %s focused=%s visible=%s" % (idx+1, vs[idx],
             getattr(vs[idx], 'focused', True), getattr(vs[idx], 'visible', True)))
     else:
-      if not any(child.on_key_press(viewer, keycode, key, mods) \
-          for child in self.children if child.focused and child.visible):
-        if not RendererConfig.shading.on_key_press(viewer, keycode, key, mods):
-          if not any(effect.on_key_press(viewer, keycode, key, mods) for effect in self.effects):
-            return
+      # try children w/ items selected, then all children, then shading fn, then effect fns
+      if not self.selection or not any(rdr.on_key_press(viewer, keycode, key, mods) \
+          for rdr in unique(hit.visrdr for hit in self.selection)):
+        if not any(child.on_key_press(viewer, keycode, key, mods) \
+            for child in self.children if child.focused and child.visible):
+          if not RendererConfig.shading.on_key_press(viewer, keycode, key, mods):
+            if not any(effect.on_key_press(viewer, keycode, key, mods) for effect in self.effects):
+              return
     viewer.repaint()
 
 
@@ -646,3 +655,11 @@ class VisGlobe:
 
   def on_key_press(self, viewer, keycode, key, mods):
     return False
+
+
+def box_triangles(pbcbox, color=(255, 0, 0, 127)):
+  """ create object for rendering 3D box `pbcbox` use with VisTriangles() """
+  verts0, normals, indices = cube_separate(flat=False)  # returns unit cube: (0..1,0..1,0..1)
+  vertices = np.dot(verts0, np.diag(pbcbox))  #- 0.5*pbcbox
+  # for a general transformation, we'd need to apply to normals then renormalize
+  return Bunch(r=vertices, normals=normals, colors=[color], indices=indices)
