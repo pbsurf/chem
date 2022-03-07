@@ -2,11 +2,7 @@ import os
 from ..basics import *
 from ..molecule import *
 from ..io import load_molecule
-
-
-def download_pdb(id):
-  assert len(id) == 4, "Invalid PDB ID"
-  os.system("wget https://files.rcsb.org/download/{0}.pdb.gz && gunzip {0}.pdb.gz".format(id))
+from ..data.pdb_data import PDB_PROTEIN, PDB_AMINO
 
 
 def _download_build_data():
@@ -93,14 +89,17 @@ class PDB_RES_T:
     # NH2 cap for C-terminal to support lone residues w/ Amber99
     self._data['NME'] = load_molecule(NME_xyz, residue='NME')
     self._data['HOH'] = load_molecule(TIP3P_xyz, residue='HOH')
-    self._data['GLH'] = self._data['GLU_LL']
-    self._data['GLU'] = self._data['GLU_LL_DHE2']
-    self._data['ASH'] = self._data['ASP_LL']
-    self._data['ASP'] = self._data['ASP_LL_DHD2']
-    self._data['HID'] = self._data['HIS_LL_DHE2']
-    self._data['HIE'] = self._data['HIS_LL_DHD1']
-    self._data['LYN'] = self._data['LYS_LL_DHZ3']
-    self._data['ARN'] = self._data['ARG_LL_DHH22']
+    # use zwitterionic, biological pH versions for three-letter name
+    for res in PDB_AMINO:
+      self._data[res + '_'], self._data[res] = self._data[res], self._data[res + '_LFZW']
+    self._data['GLH'] = self._data['GLU_LFZW']
+    self._data['GLU'] = self._data['GLU_LFZW_DHE2']
+    self._data['ASH'] = self._data['ASP_LFZW']
+    self._data['ASP'] = self._data['ASP_LFZW_DHD2']
+    self._data['HID'] = self._data['HIS_LFZW_DHE2']
+    self._data['HIE'] = self._data['HIS_LFZW_DHD1']
+    self._data['LYN'] = self._data['LYS_LFZW_DHZ3']
+    self._data['ARN'] = self._data['ARG_LFZW_DHH22']
 
   def __call__(self, res=None):
     if self._data is None: self._load()
@@ -119,6 +118,7 @@ PDB_RES = PDB_RES_T(DATA_PATH + '/aa-variants-v1.cif')
 # build a peptide
 # phi, psi for common folds - from build_seq.py from pldserver1.biochem.queensu.ca/~rlc/work/pymol/
 # - alpha helix: -57,-47; beta (antiparallel) sheet -139,-135; parallel sheet -119,-113; 3/10 helix -40.7,30
+#  pi helix: -57,-70
 # refs: Tinker protein.f:676
 def add_residue(mol, res, phi, psi):  #, chain='*'):
   """ add residue `res` to `mol` with `phi`, `psi` angles in degrees """
@@ -155,6 +155,9 @@ def add_residue(mol, res, phi, psi):  #, chain='*'):
     mol.angle([c1, n2, hn2], 118.0)
     mol.dihedral([o1, c1, n2, hn1], 180.0, incl3=False)
     mol.dihedral([o1, c1, n2, hn2], 0.0, incl3=False)
+  elif nextres.name == 'PRO':
+    mol.dihedral([ca1, c1, n2, ca2], 180)
+    mol.dihedral([n2, ca2, c2, oxt2], psi)  # oxt2 ~ n3
   else:
     mol.angle([c1, n2, ca2], 121.0)
     mol.dihedral([ca1, c1, n2, ca2], 180)  # "omega" angle, usually 180 deg due to partial dbl bond nature of peptide bond
@@ -168,7 +171,7 @@ def add_residue(mol, res, phi, psi):  #, chain='*'):
 
 # print(np.array(get_bb_angles(mol))/np.pi*180)
 def get_bb_angles(mol, chain='*'):
-  """ get peptide backbone angles """
+  """ get peptide backbone dihedral angles """
   c = mol.select(chain + ' * C', sort=True)
   n = mol.select(chain + ' * N', sort=True)
   ca = mol.select(chain + ' * CA', sort=True)
@@ -179,6 +182,15 @@ def get_bb_angles(mol, chain='*'):
   psi = [ mol.dihedral([n[ii], ca[ii], c[ii], n[ii+1]]) for ii in range(len(c)-1) ]
   omega = [ mol.dihedral([ca[ii], c[ii], n[ii+1], ca[ii+1]]) for ii in range(len(c)-1) ]
   return phi, psi, omega
+
+
+def set_bb_angles(mol, resnum, phi=None, psi=None, rel=False):
+  """ set backbone dihedrals `phi` and/or `psi` for residue `resnum` in `mol` """
+  n,ca,c,h2,oxt = res_select(mol, resnum, 'N,CA,C,H2,OXT')
+  c0 = res_select(mol, resnum-1, 'C')[0] if resnum-1 in mol.atomsres(mol.atoms[n].mmconnect) else h2
+  n2 = res_select(mol, resnum+1, 'N')[0] if resnum+1 in mol.atomsres(mol.atoms[c].mmconnect) else oxt
+  if phi is not None: mol.dihedral([c0, n, ca, c], newdeg=phi, rel=rel)
+  if psi is not None: mol.dihedral([n, ca, c, n2], newdeg=psi, rel=rel)
 
 
 def sort_chains(mol):
@@ -320,17 +332,29 @@ def _load_rotamers():
     ROTAMERS['_stats'][res] = [ROTAMERS['_stats'][res][ii] for ii in ord]
 
 
-def get_rotamers(res=None):
+def get_rotamers(res=None, weights=False):
   if not ROTAMERS: _load_rotamers()
-  return ROTAMERS.get(res, []) if res is not None else ROTAMERS
+  if res is None:
+    return (ROTAMERS, ROTAMERS[_stats]) if weights else ROTAMERS
+  return (ROTAMERS.get(res, []), ROTAMERS['_stats'].get(res,[])) if weights else ROTAMERS.get(res, [])
 
 
-def set_rotamer(mol, resnum, angles):
+def _rotamer_atoms(mol, resnum):
   XG = res_select(mol, resnum, 'CG,CG1,OG,OG1,SG', squash=True)
   XD = res_select(mol, resnum, 'CD,CD1,ND1,OD1,SD', squash=True)  # CD1: LEU; ND1: HIS; OD1: ASN; SD: MET
   XE = res_select(mol, resnum, 'CE,NE,OE1', squash=True)  # CE: MET, LYS; NE: ARG; OE1: GLU, GLN
   XZ = res_select(mol, resnum, 'CZ,NZ', squash=True)  # CZ: ARG; NZ: LYS
-  atoms = res_select(mol, resnum, 'N,CA,CB') + XG + XD + XE + XZ
+  return res_select(mol, resnum, 'N,CA,CB') + XG + XD + XE + XZ
+
+
+def set_rotamer(mol, resnum, angles, rel=False):
+  atoms = _rotamer_atoms(mol, resnum)
   for ii,ang in enumerate(angles):
-    mol.dihedral(atoms[ii:ii+4], ang)
+    mol.dihedral(atoms[ii:ii+4], ang, rel=rel)
   return mol
+
+
+# note this returns angles in radians even though set_rotamer() is passed angles in degrees
+def get_rotamer_angles(mol, resnum):
+  atoms = _rotamer_atoms(mol, resnum)
+  return [mol.dihedral(atoms[ii:ii+4]) for ii in range(len(atoms)-3) if atoms[ii+3] is not None]

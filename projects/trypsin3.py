@@ -9,14 +9,6 @@ from chem.mm import *
 from chem.vis.chemvis import *
 from scipy.spatial.ckdtree import cKDTree
 
-# MM-GBSA binding energies
-def mmgbsa(mol, Rs, sel, ff):
-  selatoms = mol.select(sel)
-  EandG = OpenMM_EandG(mol.extract_atoms(selatoms), ff)
-  return np.array([ EandG(r[selatoms], grad=False)[0] for r in Rs ]) if np.ndim(Rs) > 2 \
-      else EandG(Rs[selatoms], grad=False)[0]
-
-
 # maxiter=100: we need to optimize better than for combined calc!
 def dE_binding_sep(mol, ff, host, lig, r=None, maxiter=100):
   if r is None: r = mol.r
@@ -30,16 +22,9 @@ def dE_binding_sep(mol, ff, host, lig, r=None, maxiter=100):
   return (eAI - eA - eI)*KCALMOL_PER_HARTREE
 
 
-def dE_binding(mol, ff, host, lig, r=None):
-  if r is None: r = mol.r
-  selA, selI = mol.select(host), mol.select(lig)
-  eAI, eA, eI = [ mmgbsa(mol, r, sel, ff) for sel in [sorted(selA+selI), selA, selI] ]
-  return (eAI - eA - eI)*KCALMOL_PER_HARTREE  #np.mean() ... return array for better analysis
-
-
 def atomic_E_bonded(mol, ff=None, ctx=None):
   if ff is not None or ctx is not None:
-    openmm_load_params(mol, ff=ff, sys=(ctx.getSystem() if ctx else None), vdw=True, bonded=True)
+    openmm_load_params(mol, ctx.getSystem() if ctx else ff, vdw=True, bonded=True)
   comp = {}
   #Emm, Gmm = SimpleMM(mol, ncmm=NCMM(mol, qqkscale=OPENMM_qqkscale))(components=comp)
   Emm, Gmm = mmbonded(mol, components=comp)
@@ -78,7 +63,7 @@ def set_closest_rotamer(mol, resnum, ligatoms):
     set_rotamer(mol, resnum, rotamers[argmin])
 
 
-from chem.opt.dlc import HDLC
+from chem.opt.dlc import HDLC, DLC
 
 # an alternative to choosing nearest rotamer for each sidechain might be to turn off non-bonded interactions
 #  between sidechain and rest of host (but not lig) for first stage of relaxation
@@ -95,7 +80,8 @@ def mutate_relax(mol, resnums, newress, ff, ligatoms=None, mmargs={}, optargs={}
   ctx = openmm_EandG_context(mut, ff, **mmargs)  #, rigidWater=True)  #constraints=openmm_app.HBonds)
   mutR = mut.r
   coords = HDLC(mut, [Rigid(mutR, res.atoms, pivot=None) if res.name == 'HOH' else
-      XYZ(mutR, atoms=res.atoms) for res in mut.residues])
+      #DLC(mut, atoms=res.atoms, autoxyzs='all', recalc=1) if resnum in resnums else
+      XYZ(mutR, atoms=res.atoms) for resnum,res in enumerate(mut.residues)])
   res, mut.r = moloptim(partial(openmm_EandG, ctx=ctx), mol=mut, coords=coords, **optargs)
   return mut, res.fun
 
@@ -130,6 +116,18 @@ def filled(dim, val=None):
   return [filled(dim[1:], val) for ii in range(dim[0])] if len(dim) > 1 else [val]*dim[0]
 
 
+def find_nearres(mol, host, lig, max_dist=4.0):
+  """ return indices of residues of `mol` in `host` within `max_dist` of `lig` """
+  r = mol.r
+  selhost = mol.select(host)
+  kd = cKDTree(r[mol.select(lig)])
+  dists, locs = kd.query(r[selhost], distance_upper_bound=2*max_dist)
+  dsort = np.argsort(dists)
+  nearest = np.asarray(selhost)[dsort]
+  nearest = nearest[ dists[dsort] < max_dist ]
+  return unique(mol.atoms[a].resnum for a in nearest)
+
+
 # calculate binding energies for single mutations
 def dE_mutations(molAI, nearres, candidates, ff, host, lig, mAI=None, skip=None, optargs={}):
   dim = (len(nearres), len(candidates))
@@ -143,8 +141,7 @@ def dE_mutations(molAI, nearres, candidates, ff, host, lig, mAI=None, skip=None,
         continue
       newres = mAI[ii][jj].extract_atoms(resnums=[resnum]) if mAI is not None else resname
       mutAI[ii][jj], eAI = mutate_relax(molAI, resnum, newres, ff=ff, ligatoms=lig, optargs=optargs)  # host + lig
-      #if (eAI > e0AI + 0.5) != check_strain(mutAI[ii][jj], ff):
-      #  print("Energy check does not match strain check!")
+      #if (eAI > e0AI + 0.5) != check_strain(mutAI[ii][jj], ff): print("Energy check does not match strain check!")
       if eAI > e0AI + 0.5:  #0 or ebmaxAI > 0.05:  # clash
         print("%d -> %s failed with E = %f" % (resnum, resname, eAI))
         continue
@@ -216,6 +213,7 @@ def dE_theos(molAI, nearres, candidates, ff, mAI, theos, host, lig):
 # global/non-sequential search
 # - given initial set of N theozymes, mutate residues based on heuristic weights, replace worst of N theozymes
 #  if better
+# - aiming for 50% chance of single res change, 25% two res, etc.; alternative would be explicitly limit to 1 or 2 changes
 # Try genetic algorithm w/ cross-over (mating)?
 # - choose a subset (best half? probabilistically based on energy?), then partition into pairs
 # - use clustering algo on residue pair distance to generate clusters?
@@ -225,12 +223,8 @@ def dE_theos(molAI, nearres, candidates, ff, mAI, theos, host, lig):
 # - for subsequent residues, choose parent, weighted by choices of nearby residues
 # - choose a different candidate (not from either parent) w/ some probability (based on amino acid similarity and deAI)
 
-# l1normalize() might be a more precise name
-def pnormalize(v):
-  """ normalize array of probabilities (to sum to 1) """
-  return np.asarray(v)/(np.sum(v) or 1.0)
-
 from chem.data.pdb_bonds import GRANTHAM_DIST
+pnomr
 
 def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=200):
   idxhist = list(theos)
@@ -245,7 +239,7 @@ def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=
   demaxidx = max(range(N), key=lambda kk: dehist[kk])
   chack = ['HIS' if c == 'HIE' else c for c in candidates]
   # range of values is 5 to 215; set weight = 0 for no change case; consider, e.g., **2 to increase effect
-  grantham_weights = np.array([ pnormalize([1.0/(GRANTHAM_DIST[a][b] or np.inf) for b in chack]) for a in chack])
+  grantham_weights = np.array([ l1normalize([1.0/(GRANTHAM_DIST[a][b] or np.inf) for b in chack]) for a in chack])
   eye = np.eye(len(candidates))
   # favor lighter residues
   wscatoms = np.array([1.0/(1+len(PDB_RES()[res].select('znuc > 1 and not extbackbone'))) for res in candidates])
@@ -254,21 +248,21 @@ def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=
       weights = np.zeros_like(deAI0)  #[0]*len(nearres)
       for jj,_ in enumerate(nearres):
         # favor more common residues for given position
-        w0 = pnormalize(np.bincount([theo[jj] for theo in idxhist[:N]], minlength=len(candidates)))
+        w0 = l1normalize(np.bincount([theo[jj] for theo in idxhist[:N]], minlength=len(candidates)))
         # ... but also favor candidates which have never been tried for this position
-        w1 = pnormalize(np.bincount([theo[jj] for theo in idxhist], minlength=len(candidates)) == 0)
+        w1 = l1normalize(np.bincount([theo[jj] for theo in idxhist], minlength=len(candidates)) == 0)
         # favor similar residues
         w2 = grantham_weights[ idxhist[ii%N][jj] ]
         # favor residues w/ better binding energy
-        w3 = pnormalize(np.exp(-0.1*deAI0[jj]))  #1 + 0.5*np.clip(-0.1*deAI0[jj], -1, 1))
+        w3 = l1normalize(np.exp(-0.1*deAI0[jj]))  #1 + 0.5*np.clip(-0.1*deAI0[jj], -1, 1))
         # favor no change
         wsame = eye[idxhist[ii%N][jj]]
         # combine terms
-        weights[jj] = pnormalize(w0 + w1 + w2 + w3 + 4*wsame + 0.5*wscatoms)
+        weights[jj] = l1normalize(w0 + w1 + w2 + w3 + 4*len(nearres)*wsame)  #+ 0.5*wscatoms)
 
       for _ in range(100):
         idxs = [ np.random.choice(range(len(candidates)), p=weights[jj]) for jj,_ in enumerate(idxhist[ii%N]) ]
-        if not any( np.all(idxs == i) for i in idxhist ): break
+        if np.any(idxs != idxhist[ii%N]) and not any( np.all(idxs == i) for i in idxhist ): break
 
       molAI = molAIhist[ii%N]
       # don't touch residue if not changing
@@ -283,8 +277,8 @@ def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=
       dE = deAI - deAZ
 
       accept = deAI < 0 and deAZ < 0 and dE <= dehist[demaxidx]
-      print("%03d: %r -> %r : %f - %f = %f%s" %
-          (ii, idxhist[ii%N], idxs, deAI, deAZ, dE, ' (accept)' if accept else ''))
+      print("%03d: %r -> %r (%d changes): %f - %f = %f%s" % (ii, idxhist[ii%N], idxs,
+          np.count_nonzero(idxhist[ii%N] != idxs), deAI, deAZ, dE, ' (accept)' if accept else ''))
       idxhist.append(idxhist[demaxidx] if accept else idxs)
       dehist.append(dehist[demaxidx] if accept else dE)
       if accept:
@@ -316,7 +310,7 @@ def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=
 #  - genetic algo (w/ recombination?) seems like most promising metaheuristic for this problem (vs., e.g., simulated annealing)
 
 
-## Next:
+# Done:
 # - MM-GBSA w/ trajectory for best final geometries ... seems reasonable
 # - try some different residues for lig, e.g. GLU, GLN, TYR
 #  - GLU ... seems reasonable; explicit waters may have shifted to bad positions
@@ -324,13 +318,11 @@ def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=
 # - play with 1PSO.pdb (pepsin - aspartic protease)
 # - have mutate_relax check strain after e.g. 10 iter and stop if OK; or just use df/f termination threshold
 #  ... try gtol ~ 0.05 (0.1 - 0.01)
+## Next:
 # - visually investigate binding of explicit waters
-# - chorismate mutase, optimizing for difference between reactant and product binding
 # - try MM-GBSA w/ different subsets of explicit waters near active site from MD run; try vacuum instead of implicit solvent?
 # - what is behavior of (explicit) waters in a hydrophobic pocket? not fixed?
-# More:
-# - any way to enable continuous (instead of discrete) optimization? ... something like point charge theozyme?
-# - how to do from scratch (w/o preexisting pocket)?  Identify charged LIG atoms and try residues w/ oppositely charged atoms (and hydrophobic residues near uncharged LIG atoms?)
+# - does "SA" part of MM-PBSA account for solvent-ligand vdW?  If not then what is implication of vdW inclusion in host-ligand energy?
 
 
 ## Issues
@@ -346,224 +338,13 @@ def dE_search(theos, molAI, molAZ, nearres, candidates, ff, mAI, deAI0, maxiter=
 # - we can relax after removing lig to check *barrier* for binding, but seems that, with enough relaxation steps, protein expands so binding site is fairly relaxed rather than having a binding barrier
 # - backbone looks to have significant interaction (when sidechain is GLY), so just working w/ sidechains is an oversimplification
 # - for complete design, we don't necessarily want to maximize binding energy - we'd have a specific target value (and want to keep product binding energy low)
-
-# - water has much more freedom to arrange itself in active site than ligand ... so non-polar residues in active site are important? ... does MM-PBSA handle this well?
-# ... also suggests we might want to ignore HOH binding for initial stage (all GLY but one) since water will have more freedom to arrange vs. final active site
-# ... maybe use only deAZ, then explore deAI - deAZ for single mutations from resulting site
-
-
-## save_zip: save string as .txt instead of .pkl
-## change to 4GB RAM, 2 CPU cores and try to get multi-threading working for pyscf (or psi4) and openmm
-# - first check threads with, e.g., htop (-p PID)
-## should add a "charge" attribute to Molecule instead of having to keep track separately?
-## automated GAFF protonation check?
-
-
-T0 = 300  # Kelvin
-
 # - note that we should not expect to be using force field params derived from QM calcs in the future, since
 #  a single point calculation isn't sufficient, e.g., we'd need to scan dihedrals to get torsion params
 # - https://openforcefield.org - SMIRNOFF - force field parameters assigned based on "SMIRKS" string (similar to SMILES) describing environment of part of molecule.  So it can be said that params are assigned directly, instead of first assigning atom types, then params.  This seems like a promising direction.
 
-tleap_in = """source leaprc.gaff
-mods = loadAmberParams mol.frcmod
-mol = loadMol2 mol.mol2
-saveAmberParm mol mol.prmtop mol.inpcrd
-quit"""
-
-#from simtk.openmm.app.amberprmtopfile import AmberPrmtopFile
-#AmberPrmtopFile("{0}.prmtop".format(res)).createSystem()
-import parmed
-
-# refs:
-# - AmberTools manual
-# - http://ambermd.org/tutorials/basic/tutorial4b/
-# - https://docs.bioexcel.eu/2020_06_09_online_ambertools4cp2k/
-# - https://github.com/ParmEd/ParmEd/issues/1109
-def antechamber_prepare(mol, res, netcharge=0):
-  dir = '{0}_amber'.format(res)
-  os.mkdir(dir)
-  os.chdir(dir)
-  write_pdb(mol, 'mol.pdb')
-  os.system("antechamber -i mol.pdb -fi pdb -o mol.mol2 -fo mol2 -c bcc -nc %d -s 2" % netcharge)
-  os.system("parmchk2 -i mol.mol2 -f mol2 -o mol.frcmod")
-  write_file("mol.tleap.in", tleap_in)
-  os.system("tleap -f mol.tleap.in")
-  # now load with parmed to convert to OpenMM XML
-  amber = parmed.load_file('mol.prmtop', 'mol.inpcrd')
-  # unique_atom_types needed to prevent openmm errors when loading multiple force field files
-  omm = parmed.openmm.OpenMMParameterSet.from_parameterset(
-      parmed.amber.AmberParameterSet.from_structure(amber), unique_atom_types=True)
-  #omm = parmed.openmm.OpenMMParameterSet.from_structure(amber)
-  omm.residues.update(parmed.modeller.ResidueTemplateContainer.from_structure(amber).to_library())
-  os.chdir('..')
-  omm.write('%s.ff.xml' % res)
-  amber.save('%s.mol2' % res)  #  seems mol2 is the only format for which parmed will include bonds
-  return amber
-
-
-# assign simple gaff types to allow for basic relaxation (e.g., as starting point for QM geom optim)
-# try Tinker basic.prm force field?
-def gaff_trivial(mol):
-  for a in mol.atoms:
-    conn = [mol.atoms[jj].znuc for jj in a.mmconnect]
-    if a.znuc == 1:
-      a1 = mol.atoms[a.mmconnect[0]]
-      if a1.znuc == 6:
-        elewd = sum(mol.atoms[jj].znuc in [7,8,9,17,35] for jj in a1.mmconnect)
-        a.mmtype = ['hc','h1','h2','h3'][elewd]
-      else:
-        a.mmtype = {7:'hn', 8:'ho'}[a1.znuc]
-    elif a.znuc == 6: a.mmtype = [None,'c1','c2','c3'][len(conn)-1]
-    elif a.znuc == 7: a.mmtype = ['n1','n2','n3','n4'][len(conn)-1]
-    elif a.znuc == 8: a.mmtype = 'o' if len(conn) == 1 else 'oh' if 1 in conn else 'os'
-
-
-# print python traceback on segfault
-import faulthandler; faulthandler.enable()
-
-
-# force field params for ligands
-if not os.path.exists("PRE.mol2"):
-  mISJ = load_compound('ISJ').remove_atoms([21,23])
-  antechamber_prepare(mISJ, 'ISJ', netcharge=-2)
-
-  # ISJ -> PRE: remove 0--10, add 2--15  (load_compound('PRE') has different atom order and other problems)
-  mPRE = Molecule(mISJ)
-  mPRE.residues[0].name = 'PRE'
-  mPREbonds = mPRE.get_bonds()
-  mPREbonds.remove((0,10))
-  mPREbonds.append((2,15))
-  mPRE.set_bonds(mPREbonds)
-
-  # antechamber does (semi-empirical) QM geom opt, so we need to start from a reasonable geometry
-  gaff = load_amber_dat(DATA_PATH + '/amber/gaff.dat')
-  gaff_trivial(mPRE)
-  set_mm_params(mPRE, gaff, allowmissing=True)
-  res, mPRE.r = moloptim(SimpleMM(mPRE), mPRE, maxiter=200)
-
-  antechamber_prepare(mPRE, 'PRE', netcharge=-2)
-
-
-## Next
-# - we need to set up a system with PRE!
-## HEY! Cut and paste everything, then factor out commonality with trypsin case
-# - explicit solvent w/o lig (for near waters) ... perhaps we should use all-GLY for this?
-# ... should we populate all 3 sites to compare?
-# - try MM-GBSA with only residues w/in ~10 Ang of active site (and NoCutoff) (possible w/ openmm? or need to use SimpleMM?)
-
-# - try multiple rotamers for big sidechains? decrease vdW r0 and qq charge to allow molecules to pass through one another? skip rotamers w/ little difference in position of end of sidechain?  manually choose rotamers and list in candidates?
-
-
-ff = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml', 'ISJ.ff.xml', 'PRE.ff.xml', nonbondedMethod=openmm.app.PME)
-ffgbsa = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml', 'implicit/obc1.xml', 'ISJ.ff.xml', 'PRE.ff.xml', nonbondedMethod=openmm.app.CutoffNonPeriodic)
-
-host, ligin, ligout = '/A,B,C//', '/I//', '/O//'
-
-if os.path.exists("CMwt.zip"):
-  molwt_AI, molwt_AO = load_zip("CMwt.zip", 'molwt_AI', 'molwt_AO')
-else:
-  cm_pdb = load_molecule('2CHT.pdb', bonds=False)
-  mol = cm_pdb.extract_atoms('/A,B,C/~TSA,HOH/*')  # active sites are at interface of chains of the trimer
-  mol.remove_atoms('*/HIS/HD1')  # 2CHT includes both HD1 and HE2 on all HIS
-  #mol.remove_atoms('not protein')
-  mol = add_hydrogens(mol)
-
-  # this will place lig at active site between chains A and C
-  mISJ = load_molecule('ISJ.mol2')
-  mISJ.residues[0].chain = 'I'
-  mISJ = align_mol(mISJ, cm_pdb.r[[13539, 13535, 13530]], sel=[6,1,3], sort=None)
-  molwt_AI = Molecule(mol)
-  molwt_AI.append_atoms(mISJ)
-  molwt_AI.r = molwt_AI.r - np.mean(mol.extents(), axis=0)  # move to origin - after appending lig aligned to PDB pos!
-  # E&G (ffgbsa): 10s w/ no cutoff; 0.5s w/ default 1nm cutoff
-  molwt_AI.dihedral(res_select(molwt_AI, ligin, 'H1,C1,O11,C12'), newdeg=180, rel=True)
-  molwt_AI.dihedral(res_select(molwt_AI, ligin, 'C1,O11,C12,C16'), newdeg=180, rel=True)
-  #res, mISJ.r = moloptim(OpenMM_EandG(mISJ, ffgbsa), r0=mPRE.r, mol=mISJ, maxiter=200) -- this might be more general
-  res, molwt_AI.r = moloptim(OpenMM_EandG(molwt_AI, ffgbsa), molwt_AI, maxiter=100)
-
-  molwt_AO = Molecule(mol)
-  mPRE = load_molecule('PRE.mol2')
-  mPRE.residues[0].chain = 'O'  #'P'? 'J'?
-  mPRE = align_mol(mPRE, cm_pdb.r[[13539, 13535, 13530]], sel=[6,1,3], sort=None)
-  molwt_AO.append_atoms(mPRE)
-  molwt_AO.r = molwt_AO.r - np.mean(mol.extents(), axis=0)
-  res, molwt_AO.r = moloptim(OpenMM_EandG(molwt_AO, ffgbsa), molwt_AO, maxiter=100)
-
-  save_zip('CMwt.zip', molwt_AI=molwt_AI, molwt_AO=molwt_AO)
-
-  openmm_load_params(molwt_AI, ff=ff)
-  protonation_check(molwt_AI)
-  badpairs, badangles = geometry_check(molwt_AI)
-
-  #molZ = solvate_prepare(mol, ff, T0, neutral=True, solvent_chain='Z')  #, eqsteps=1)
-  #save_zip(filename + '_solv.zip', mol=mol, molZ=molZ, v_molZ=molZ.md_vel)  # save MD velocities from solvate_prepare for restart
-
-#dE_binding(molwt_AI, ffgbsa, '/A,C//', '/B//')  #-197.9393432346021
-#dE_binding(molwt_AI, ffgbsa, '/A,B//', '/C//')  #-194.9137667702444
-#dE_binding(molwt_AI, ffgbsa, '/A//', '/B,C//')  #-189.40447204730478
-
-
-#molZ = solvate_prepare(mol, ff, T0, neutral=True, solvent_chain='Z')  #, eqsteps=0)
-#vis = Chemvis([ Mol(molZ, [ VisGeom(style='licorice') ]), Mol(box_triangles(molZ.pbcbox), [VisTriangles()]) ]).run()
-
-
-def find_nearres(mol, host, lig, max_dist=4.0):
-  r = mol.r
-  selhost = mol.select(host)
-  kd = cKDTree(r[mol.select(lig)])
-  dists, locs = kd.query(r[selhost], distance_upper_bound=10)
-  dsort = np.argsort(dists)
-  nearest = np.asarray(selhost)[dsort]
-  nearest = nearest[ dists[dsort] < 4.0 ]
-  return unique(mol.atoms[a].resnum for a in nearest)
-
-
-# start interactive
-import pdb; pdb.set_trace()
-
-if os.path.exists('mutate0.zip'):
-  nearres, candidates, dE0_AI, mol0_AI = load_zip('mutate0.zip', 'nearres', 'candidates', 'dE0_AI', 'mol0_AI')
-else:
-  nearres = find_nearres(molwt_AI, '/A,B,C/*/~C,N,CA,O,H,HA', ligin)
-  nearres = [5, 88, 288, 292, 304, 303]
-  # note the inclusion of ASH and GLH
-  #candidates = ['ALA', 'SER', 'VAL', 'THR', 'ILE', 'LEU', 'ASN', 'ASP', 'ASH', 'GLN', 'GLU', 'GLH' 'LYS', 'HIE', 'PHE', 'ARG', 'TYR', 'TRP']
-  candidates = ['GLY', 'SER', 'THR', 'LEU', 'ASN', 'ASP', 'ASH', 'CYS', 'MET', 'GLN', 'GLU', 'GLH', 'LYS', 'HIE', 'ARG']
-
-  # conventions: *wt_*: wild-type; *0_*: nearres -> GLY; *_AI: host + lig; *_AZ: host + some explicit waters
-
-  # note that we can't do lig = ~host in mmgbsa() since for general case we have host + lig + solvent
-  # what about VAL instead of ALA to get closer to "average" sidechain size?
-
-  #molALA_AI, eALA_AI = mutate_relax(molwt_AI, nearres, 'ALA', ff=ffgbsa, optargs=dict(maxiter=100, verbose=-1))
-  #molVAL_AI, eVAL_AI = mutate_relax(molwt_AI, nearres, 'VAL', ff=ffgbsa, optargs=dict(maxiter=100, verbose=-1))
-  #rmsdALA = calc_RMSD(molALA_AI, molwt_AI, 'backbone', align=True) ... 0.11
-  #rmsdVAL = calc_RMSD(molVAL_AI, molwt_AI, 'backbone', align=True) ... 0.10
-  #vis = Chemvis(Mol([molwt_AI,molALA_AI, molVAL_AI], [ VisGeom(style='lines', sel=host),  VisGeom(style='spacefill', sel=ligin), VisGeom(style='licorice', sel=('resnum in %r' % nearres)) ]), fog=True).run()
-
-  dEwt_AI = dE_binding(molwt_AI, ffgbsa, host, ligin)
-  dEwt_AO = dE_binding(molwt_AO, ffgbsa, host, ligout)
-
-  mol0_AI, E0_AI = mutate_relax(molwt_AI, nearres, 'ALA', ff=ffgbsa, optargs=dict(maxiter=100, verbose=-1))
-  dE0_AI = dE_binding(mol0_AI, ffgbsa, host, ligin)
-  save_zip('mutate0.zip', nearres=nearres, candidates=candidates, dE0_AI=dE0_AI, mol0_AI=mol0_AI)
-
-
-de1AI, m1AI = dE_mutations(mol0_AI, nearres, candidates, ffgbsa, host, ligin, optargs=dict(gtol=0.04))
-de1AI -= dE0_AI
-save_zip('mutate2.zip', de1AI=de1AI, m1AI=np.ravel(m1AI))
-
-
-wtres = [molwt_AI.residues[ii].name for ii in nearres]
-mol0wt_AI, _ = mutate_relax(mol0_AI, nearres, wtres, ff=ffgbsa, optargs=dict(maxiter=100, verbose=-1))
-
-# OpenMM does not allow PME w/ implicit solvent
-mol = Molecule(mol0_AI)
-mol.pbcbox = np.array([np.max(np.diff(mol.extents(pad=10), axis=0))]*3)
-ffgbsa.sysargs['nonbondedMethod'] = openmm.app.CutoffNonPeriodic  #PME
-#ffgbsa.sysargs['nonbondedCutoff'] = 15*UNIT.angstrom
-dE_binding(mol, ffgbsa, host, ligin)
+# - water has much more freedom to arrange itself in active site than ligand ... so non-polar residues in active site are important? ... does MM-PBSA handle this well?
+# ... also suggests we might want to ignore HOH binding for initial stage (all GLY but one) since water will have more freedom to arrange vs. final active site
+# ... maybe use only deAZ, then explore deAI - deAZ for single mutations from resulting site
 
 
 # explicit solvent
@@ -710,6 +491,9 @@ if 0:
 
 
 ## Old
+
+def rotamer_mols(res):
+  return [ set_rotamer(PDB_RES(res), 0, angles) for angles in get_rotamers('HIE' if res == 'HIS' else res) ]
 
 # disabling vdW for I vs. for A+I gives same result, as expected
 def dE_binding_novdw(mol, ff, host, lig, r=None):

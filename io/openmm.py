@@ -81,8 +81,8 @@ def openmm_make_inactive(mol, sys, inactive):
 
 
 # vdw works for AMBER but not CHARMM, which uses custom non-bonded force for LJ
-def openmm_load_params(mol, sys=None, ff=None, charges=True, vdw=False, bonded=False):
-  sys = ff.createSystem(openmm_top(mol), nonbondedMethod=openmm.app.NoCutoff) if sys is None else sys
+def openmm_load_params(mol, ff=None, charges=True, vdw=False, bonded=False):
+  sys = ff.createSystem(openmm_top(mol), nonbondedMethod=openmm.app.NoCutoff) if hasattr(ff, 'createSystem') else ff
   forces = {f.__class__: f for f in sys.getForces()}
   bndforce, angforce, torforce, nbforce = forces[openmm.HarmonicBondForce], \
       forces[openmm.HarmonicAngleForce], forces[openmm.PeriodicTorsionForce], forces[openmm.NonbondedForce]
@@ -108,9 +108,56 @@ def openmm_load_params(mol, sys=None, ff=None, charges=True, vdw=False, bonded=F
       mol.mm_torsion.append(( [a1, a2, a3, a4], [ (k/EUNIT, phase/UNIT.radian, period) ] ))
 
 
-def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, **kwargs):
+# since we may have active != bondactive, just pass both instead of making a fn to fix up MM params for
+#  extract_atoms/remove_atoms
+def openmm_create_system(mol, active=None, bondactive=None, nbargs={}):
+  active = mol.listatoms() if active is None else sorted(mol.select(active))
+  bondactive = frozenset(active if bondactive is None else mol.select(bondactive))
+  idx_map = dict(zip(active, range(len(active))))
+  map_idxs = lambda bb: tuple(idx_map[b] for b in bb)
+  bonds, angles, diheds = mol.get_internals()
+
+  sys = openmm.System()
+  bndforce = openmm.HarmonicBondForce()
+  angforce = openmm.HarmonicAngleForce()
+  torforce = openmm.PeriodicTorsionForce()
+  nbforce = openmm.NonbondedForce()
+
+  for bnd in mol.mm_stretch:
+    if all(b in bondactive for b in bnd[0]):
+      bndforce.addBond(*map_idxs(bnd[0]), bnd[2]*UNIT.angstrom, bnd[1]/0.5*(EUNIT/UNIT.angstrom**2))
+  for ang in mol.mm_bend:
+    if all(b in bondactive for b in ang[0]):
+      angforce.addAngle(*map_idxs(ang[0]), ang[2]*UNIT.radian, ang[1]/0.5*(EUNIT/UNIT.radian**2))
+  for tor in mol.mm_torsion:
+    if all(b in bondactive for b in tor[0]):
+      assert len(tor[1]) == 1, "Add support for non-openmm torsions"
+      torforce.addTorsion(*map_idxs(tor[0]), tor[1][0][2], tor[1][0][1]*UNIT.radian, tor[1][0][0]*EUNIT)
+  assert not getattr(mol, 'mm_imptor', None), "Need to do mm_torsion + mm_imptor!"
+
+  for ii in active:
+    a = mol.atoms[ii]
+    sys.addParticle(ELEMENTS[a.znuc].mass)
+    nbforce.addParticle(a.mmq*UNIT.elementary_charge, a.lj_r0/2**(1/6.0)*UNIT.angstrom, a.lj_eps*EUNIT)
+
+  mapped_bonds = [ map_idxs(bb) for bb in bonds if bb[0] in idx_map and bb[1] in idx_map ]
+  nbforce.createExceptionsFromBonds(mapped_bonds, 1/1.2, 1/2.0)
+  for name,val in nbargs.items():
+    getattr(nbforce, 'set' + name.title())(val)
+
+  sys.addForce(bndforce)
+  sys.addForce(angforce)
+  sys.addForce(torforce)
+  sys.addForce(nbforce)
+  return sys
+
+
+# freezemass = 0 works for LocalEnergyMinimizer, whereas huge freezemass works for constraints
+def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, freeze=[], freezemass=1E10, **kwargs):
   sysargs = dict(dict(constraints=openmm.app.HBonds), **kwargs)  #nonbondedMethod=openmm.app.PME,
-  sys = ff.createSystem(openmm_top(mol), **sysargs)
+  sys = ff.createSystem(openmm_top(mol), **sysargs) if hasattr(ff, 'createSystem') else ff
+  for ii in mol.select(freeze):
+    sys.setParticleMass(ii, freezemass)
   if p0 is not None:
     sys.addForce(openmm.MonteCarloBarostat(p0*UNIT.bar, T0*UNIT.kelvin))
   if intgr is None:
@@ -124,30 +171,36 @@ def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, **kwargs):
 
 
 # for tracking down "Particle coordinate is nan" error
-def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vis=None, verbose=1):
+def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vel=False, sampfn=None, vis=None, verbose=1):
   """ Run OpenMM context `ctx` for `nsteps` and return position, potential energy, and, optionally, gradient
-    recorded every sampsteps
+    (if `grad` is True) recorded every `sampsteps` steps (also call `sampfn` and update `vis`, if provided).
   """
-  intgr = ctx.getIntegrator()  #sys = ctx.getSystem()
-  Es, Rs, Gs = [], [], []
+  intgr = ctx.getIntegrator()
+  isPBC = ctx.getSystem().usesPeriodicBoundaryConditions()
+  Es, Rs, Gs, Vs = [], [], [], []
   nsteps, sampsteps = int(nsteps), int(sampsteps)  # so user can pass, e.g. 1E6 (which is a float)
   try:
     for ii in range(nsteps//sampsteps):
       intgr.step(sampsteps)
-      state = ctx.getState(getEnergy=True, getPositions=True, getForces=grad, enforcePeriodicBox=True)
+      if sampfn:
+        sampfn(ii, ctx)
+      state = ctx.getState(getEnergy=True, getPositions=True,
+          getForces=grad, getVelocities=vel, enforcePeriodicBox=isPBC)
       Es.append(state.getPotentialEnergy()/EUNIT)
       #Es[-1] += state.getKineticEnergy()/EUNIT
       Rs.append(state.getPositions(asNumpy=True)/UNIT.angstrom)
       if grad:
         Gs.append(-state.getForces(asNumpy=True)/(EUNIT/UNIT.angstrom))
+      if vel:
+        Vs.append(state.getVelocities(asNumpy=True)/(UNIT.angstrom/UNIT.picosecond))
       if vis:
         vis.refresh(r=Rs[-1], repaint=True)
       if verbose > 0:
         print('.', end='', flush=True)
   except (KeyboardInterrupt, Exception) as e:
-    print("openmm_dynamic terminated by exception: ", e)
+    print("openmm_dynamic terminated by %s: %s" % (e.__class__.__name__, e))
   print('')
-  return (np.asarray(Rs), np.asarray(Es), np.asarray(Gs)) if grad else (np.asarray(Rs), np.asarray(Es))
+  return tuple(np.asarray(a) for a in (Rs, Es, Gs, Vs) if len(a) > 0)
 
 
 # OpenMM doesn't support Hessian calculations; see github.com/leeping/forcebalance/blob/master/src/openmmio.py
@@ -155,12 +208,12 @@ def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vis=None, verbose=1):
 
 def openmm_EandG_context(mol, ff=None, inactive=None, charges=None, epsilons=None, **kwargs):
   """ create an OpenMM context for single point energy and gradient calculations for `mol` using force field
-    `ff` (default Amber99sb); `inactive` atoms are made inactive (see openmm_make_inactive); charges, vdW
-     epsilon parameters overridden by lists of (atom number, value) pairs `charges`, `epsilons`
+    (default Amber99sb) or system `ff`; `inactive` atoms are made inactive (see openmm_make_inactive);
+    charges, vdW epsilon parameters overridden by lists of (atom number, value) pairs `charges`, `epsilons`
   """
   #sysargs = dict(dict(nonbondedMethod=openmm.app.NoCutoff), **kwargs)
   ff = openmm.app.ForceField('amber99sb.xml', 'tip3p.xml') if ff is None else ff
-  sys = ff.createSystem(openmm_top(mol), **kwargs)
+  sys = ff.createSystem(openmm_top(mol), **kwargs) if hasattr(ff, 'createSystem') else ff
   for ii,f in enumerate(sys.getForces()):
     f.setForceGroup(ii)
   if inactive is not None:
@@ -176,7 +229,7 @@ def openmm_EandG_context(mol, ff=None, inactive=None, charges=None, epsilons=Non
       q, sigma, _ = nbforce.getParticleParameters(ii)
       nbforce.setParticleParameters(ii, q, sigma, eps)
   # integrator required to create Context
-  intgr = openmm.VerletIntegrator(1.0*UNIT.femtoseconds)
+  intgr = openmm.VerletIntegrator(1.0*UNIT.femtoseconds)  #openmm.CustomIntegrator(0)
   return openmm.Context(sys, intgr)
 
 
@@ -200,7 +253,7 @@ def openmm_EandG(mol, r=None, ff=None, ctx=None, grad=True, components=None, **k
 
 class OpenMM_EandG:
   def __init__(self, mol, ff=None, inactive=None, charges=None, **kwargs):
-    self.ctx = openmm_EandG_context(mol, ff, inactive, charges, **kwargs)
+    self.ctx = ff if type(ff) is openmm.Context else openmm_EandG_context(mol, ff, inactive, charges, **kwargs)
     self.inactive, self.charges = inactive, charges
 
   def __call__(self, mol, r=None, inactive=None, charges=None, grad=True, components=None):

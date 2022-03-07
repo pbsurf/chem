@@ -126,9 +126,9 @@ def dfs_path(graph, start, end):
 # clock() doesn't seem to include time of any external processes run
 def benchmark(fn):
   """ simple benchmark for single run of a slow function - use timeit for all other cases """
-  c0, t0 = time.clock(), time.time()
+  c0, t0 = time.perf_counter(), time.time()  # clock -> perf_counter
   res = fn()
-  print("clock(): %fs; time(): %fs" % (time.clock() - c0, time.time() - t0))
+  print("clock(): %fs; time(): %fs" % (time.perf_counter() - c0, time.time() - t0))
   return res
 
 
@@ -193,6 +193,10 @@ def npy_bytes(x):
 ## plotting
 # `echo "backend: Qt4Agg" >> ~/.config/matplotlib/matplotlibrc` OR do matplotlib.use('Qt4Agg') to prevent
 #  crashes with default TkAgg backend when using with Chemvis
+# Ctrl+C interference: happens with both TkAgg and Qt4Agg (but not WebAgg); w/ and w/o plt.ion() (interactive
+#  mode), even when run in different thread or process (both fork and spawn) ... looks like no easy fix -
+#  bug is here: https://bugs.python.org/issue23237 - but not sure why it still happens w/ separate process
+# Solution is to run import gc; gc.collect() after closing all figure windows!
 
 # can't have keyword args after *args in Python 2!
 def plot(*args, **kwargs):
@@ -214,7 +218,7 @@ def plot(*args, **kwargs):
   plotfn = getattr(plt, kwargs.pop('fn', 'plot'))
   plotfn(*args, **kwargs)  #picker=kwargs.get('picker', None))
   if not subplot:
-    plt.show()
+    plt.show()  # try block=False here instead of ion()?
   return plt.gcf()
 
 
@@ -229,6 +233,11 @@ def normalize(v):
   if n == 0.0:
     raise Exception("Cannot normalize() null vector")
   return v/n
+
+# l1normalize() might be a more precise name
+def l1normalize(v):
+  """ normalize array of probabilities (to sum to 1) """
+  return np.asarray(v)/(np.sum(v) or 1.0)
 
 # note that this gives us rms(norm(r, axis=1)) for an array of vectors ... rename to rmsnorm()?
 def rms(v):
@@ -366,7 +375,8 @@ def calc_dist(v1, v2=None, grad=False):
   """ v1,v2: numpy 3-vectors; returns bond length (l) and, if grad=True, gradient as:
     [[dl/dx1, dl/dy1, dl/dz1], [dl/dx2, dl/dy2, dl/dz2]]
   """
-  v1, v2 = (v1,v2) if v2 is not None else v1
+  if v2 is None:
+    v1, v2 = v1
   l = norm(v1 - v2)
   if not grad:
     return l
@@ -378,7 +388,8 @@ def calc_angle(v1, v2=None, v3=None, grad=False):
   """ v1,v2,v3: numpy 3-vectors; returns interior angle in radians (a) specified by input vectors and, if
     grad=True, gradient as: [[da/dx1, da/dy1, da/dz1], [da/dx2, da/dy2, da/dz2], [da/dx3, da/dy3, da/dz3]]
   """
-  v1, v2, v3 = (v1,v2,v3) if v3 is not None else v1
+  if v3 is None:
+    v1, v2, v3 = v1
   v12 = v1 - v2
   v23 = v2 - v3
   # result is in radians (pi - converts to interior bond angle)
@@ -408,7 +419,8 @@ def calc_dihedral(v1, v2=None, v3=None, v4=None, grad=False):
   """ return dihedral angle in radians - angle between planes defined by points 1,2,3 and 2,3,4 - and
     optionally gradient; refs: Wilson, Mol. Vibrations (1955), ch. 4; JCC 17, 1132 (via Wikipedia)
   """
-  v1, v2, v3, v4 = (v1,v2,v3,v4) if v4 is not None else v1
+  if v4 is None:
+    v1, v2, v3, v4 = v1
   # vab = va - vb is vector from b to a
   v12 = v1 - v2
   v32 = v3 - v2

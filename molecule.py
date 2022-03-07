@@ -2,7 +2,7 @@ import numpy as np
 import copy, re
 from .basics import *
 from .data.elements import ELEMENTS
-from .data.pdb_bonds import PDB_STANDARD, PDB_PROTEIN
+from .data.pdb_data import PDB_STANDARD, PDB_PROTEIN, PDB_BACKBONE, PDB_EXTBACKBONE, PDB_NOTSIDECHAIN
 
 
 # To consider:
@@ -29,7 +29,7 @@ class Atom:
   """name (string), znuc: atomic number, r: position vector, mmtype: MM atom type (usually int),
     mmq: MM partial charge, mmconnect: list of atom numbers for bonded atoms
   """
-  def __init__(self, name='', znuc=0, r=None, mmtype=0, mmq=0.0, mmconnect=None, resnum=None, **kwargs):
+  def __init__(self, name='', znuc=0, r=None, mmtype=None, mmq=None, mmconnect=None, resnum=None, **kwargs):
     self.name = name
     self.znuc = ELEMENTS[znuc.title()].number if type(znuc) is str else znuc
     # don't use np.asarray because we want our own copy of r
@@ -74,6 +74,7 @@ class Molecule:
     if r is not None and znuc is not None and atoms is None:
       atoms = [Atom(r=ra, znuc=za) for ra,za in zip(r, znuc)]
     elif atoms is not None and atoms.__class__ == Molecule:
+      #self.__dict__ = copy.deepcopy(atoms.__dict__)
       residues = copy.deepcopy(atoms.residues) if residues is None else residues
       pbcbox = copy.deepcopy(atoms.pbcbox) if pbcbox is None else pbcbox
       header = copy.deepcopy(atoms.header) if header is None else header
@@ -193,8 +194,22 @@ class Molecule:
     return self.residues[self.atoms[ii].resnum]
 
 
-  def mass(self, ii=None):
-    return np.array([ELEMENTS[a.znuc].mass for a in self.atoms]) if ii is None else ELEMENTS[self.atoms[ii].znuc].mass
+  def atomsres(self, sel):  # name too similar to atomres() above?
+    """ return residue numbers intersected (or covered if ???) by atoms in sel """
+    return unique(self.atoms[ii].resnum for ii in self.select(sel))
+
+
+  def resatoms(self, res):
+    """ return list of atoms in residue(s) res """
+    res = [res] if type(res) is int else res  #sorted(res)
+    return [a for r in res for a in r.atoms]
+
+
+  def mass(self, active=None):
+    if type(active) is int:
+      return ELEMENTS[self.atoms[active].znuc].mass
+    active = range(len(self.atoms)) if active is None else active
+    return np.array([ELEMENTS[self.atoms[ii].znuc].mass for ii in active])
 
 
   def select(self, *args, **kwargs):
@@ -207,26 +222,35 @@ class Molecule:
     return list(set([jj for ii in qmatoms for jj in self.atoms[ii].mmconnect if jj not in qmatoms]))
 
 
-  def get_connected(self, idx, active=None):
-    """ get all atoms connected directly or indirectly to atom number `idx` - i.e. get molecule for `idx` """
-    active = set(active if active is not None else self.listatoms())
-    conn = set([idx])
-    def helper(ii):
+  def get_connected(self, idx, depth=np.inf, active=None):
+    """ get all atoms connected to atom(s) `idx` up to `depth` bonds away (default inf - i.e. get whole
+      molecule); note that `idx` atom(s) are included in result, unlike for get_bonded()
+    """
+    active = set(active) if active is not None else range(len(self.atoms))
+    idx = [idx] if type(idx) is int else idx
+    conn = set(idx)
+    def helper(ii, d):
       for ii in self.atoms[ii].mmconnect:
         if ii not in conn and ii in active:
           conn.add(ii)
-          helper(ii)
-    helper(idx)
+          if d > 0:
+            helper(ii, d=d-1)
+    if depth > 0:
+      for ii in idx:
+        helper(ii, depth-1)
     return list(conn)
 
 
-  def get_nearby(self, qmatoms, radius, active=None, dists=False):
-    """ return atoms within radius of any atom in qmatoms, excluding atoms in qmatoms """
-    exclude = set(qmatoms) | set(mol.listatoms(exclude=active) if active is not None else [])
-    dd = [ np.inf if ii in exclude else min(norm(a.r - self.atoms[jj].r) for jj in qmatoms)
-        for ii,a in enumerate(self.atoms) ]
-    nearby = [ii for ii,d in enumerate(dd) if d <= radius]
-    return (nearby, [dd[ii] for ii in nearby]) if dists else nearby
+  def get_nearby(self, sel, radius, active=None, dists=False):
+    """ return atoms within `radius` of any atom in `sel`, excluding atoms in `sel` (and not in `active`) """
+    from scipy.spatial.ckdtree import cKDTree
+    sel, active, r = np.array(self.select(sel)), np.array(self.select(active)), self.r
+    active = np.setdiff1d(active, sel, assume_unique=True)
+    #if len(sel) < 10:  -- kd-tree a bit slower for <~5, but not worth a potential len-dependent bug
+    #dr = r[active][:,None,:] - r[sel][None,:,:];  dd = np.sqrt(np.min(np.sum(dr*dr, axis=2), axis=1))
+    dd, _ = cKDTree(r[sel]).query(r[active], distance_upper_bound=radius)
+    hits = active[dd <= radius].tolist()
+    return (hits, dd[dd <= radius]) if dists else hits
 
 
   def set_bonds(self, bonds, replace=True):
@@ -338,11 +362,8 @@ class Molecule:
      `newdeg` (in degrees) by rotating fragment containing 3rd atom of `angle`; rel=True indicates new angle
      is relative to current
     """
-    v12 = self.atoms[angle[0]].r - self.atoms[angle[1]].r
-    v23 = self.atoms[angle[1]].r - self.atoms[angle[2]].r
-    # normalize
-    v12 /= norm(v12)
-    v23 /= norm(v23)
+    v12 = normalize(self.atoms[angle[0]].r - self.atoms[angle[1]].r)
+    v23 = normalize(self.atoms[angle[1]].r - self.atoms[angle[2]].r)
     # result is in radians (pi - converts to interior bond angle)
     olddeg = np.pi - np.arccos(np.dot(v12, v23))
     if newdeg is not None:
@@ -400,7 +421,7 @@ class Molecule:
     if attr == 'bonds':
       return self.get_bonds()
     if attr == 'chains':
-      return list(dict.fromkeys(res.chain for res in self.residues))  # preserves order (in python 3)
+      return unique(res.chain for res in self.residues)
     if attr == 'mmconnect':
       return [ getattr(atom, attr) for atom in self.atoms ]  # numpy complains about ragged array
     #if self.atoms and hasattr(self.atoms[0], attr):  # infinite loop if self.atoms not set
@@ -439,21 +460,12 @@ class Molecule:
 #  need connectivity info, etc) should not be part of molecule class and should work
 #  with simple lists of coordinates
 
-def get_header(mol):
-  header = getattr(mol, 'header', None)
-  if not header:
-    import time
-    today = time.strftime("%d-%b-%y", time.localtime()).upper()
-    header = "CUSTOM MOLECULE                         %s   XXXX" % today
-  return header
-
-
 def mol_fragments(mol, active=None):
   """ return set of unconnected fragments from `active` (default, all) atoms in `mol` """
   remaining = set(active if active is not None else mol.listatoms())
   frags = []
   while remaining:
-    frags.append(mol.get_connected(remaining.pop(), active))
+    frags.append(mol.get_connected(remaining.pop(), active=active))
     remaining -= set(frags[-1])
   return frags
 
@@ -533,7 +545,9 @@ def init_qmatoms(mol, sel, qmbasis):
   return sel
 
 
-# consider returning a class with __call__ instead so we can set __repr__ to print sel string!
+# consider returning a class with __call__ instead so we can set __repr__ to print sel string?
+# I tried a fancy selection scheme that only calculated what was needed for each atom ... but it ended up
+#  being slower, presumably due to branches and calls - see test/molecule_test.py
 def decode_atom_sel_str(sel):
   """ unqualifed exec() can't be in same function as a nested fn or lambda """
   locs = {}  # needed for Python 3
@@ -554,9 +568,9 @@ def sel_fn(atom, mol, idx):
   # booleans
   polymer = resname in PDB_STANDARD
   protein = resname in PDB_PROTEIN
-  backbone = protein and name in ['C', 'N', 'CA']
-  extbackbone = protein and name in ['C', 'N', 'CA', 'O', 'H', 'H1', 'H2', 'H3', 'OXT', 'HXT']
-  sidechain = protein and name not in ['C', 'N', 'O', 'H', 'H1', 'H2', 'H3', 'OXT', 'HXT']
+  backbone = protein and name in PDB_BACKBONE
+  extbackbone = protein and name in PDB_EXTBACKBONE
+  sidechain = protein and name not in PDB_NOTSIDECHAIN
   water = resname == 'HOH'
   return """ + sel, globals(), locs)
   # ---
@@ -585,6 +599,7 @@ def decode_atom_sel(sel):
 #  all equivalent: '/A//', '/A/', '/A', 'A//', 'A * *', '/A *', '/A/*', '/A/*/*', ...
 # Can be passed as `pdb` keyword arg or in `sel` if first char is / or *
 
+# See test/molecule_test.py for alternative lambda-based selection scheme
 def select_atoms(mol, sel=None, sort=None, pdb=None):
   if sort is True:
     sort = lambda atom, mol, ii: (atom.resnum, atom.name, ii)  # default sort key
@@ -610,7 +625,7 @@ def select_atoms(mol, sel=None, sort=None, pdb=None):
       # should we join with 'or' and create a single selection string instead?
       selected.extend(select_atoms(mol, atomsel if atomsel else 'True'))  # '*' will give empty atomsel
   elif type(sel) is not str and not callable(sel):  #safelen(sel) > 0 and type(sel[0]) is int:
-    selected = sel  # preserve order
+    selected = [sel] if type(sel) is int else sel  # preserve order
   else:
     sel_fn = decode_atom_sel(sel)
     selected = [ii for ii, atom in enumerate(mol.atoms) if sel_fn is None or sel_fn(atom, mol, ii)]
@@ -619,7 +634,9 @@ def select_atoms(mol, sel=None, sort=None, pdb=None):
 
 # when selecting from one residue, this is more efficient than looping over every atom as select_atoms() does
 def res_select(mol, res, atoms, squash=False):
-  """ select atoms with names in `atoms` (['A','B',...] or 'A,B,...') from residue `res` in Molecule `mol` """
+  """ select atoms with names in `atoms` (['A','B',...] or 'A,B,...') from residue `res` in Molecule `mol`,
+    preserving order in `atoms`
+  """
   atoms = [a.strip() for a in (atoms.split(',') if type(atoms) is str else atoms)]
   res = mol.residues[res] if type(res) is int else mol.atomres(mol.select(res)[0]) if type(res) is str else res
   hits = [next((ii for ii in res.atoms if mol.atoms[ii].name == a), None) for a in atoms]
@@ -656,9 +673,10 @@ def tile_mol(mol, extents, shape, rand_rot=False, rand_offset=0):
 ## Analysis fns - these probably should be moved to a separate file
 
 # note that unweighted average of all positions is the centroid while weighted average is the center of mass
-def center_of_mass(mol):
-  weights = np.array([ELEMENTS[z].mass for z in mol.znuc])
-  return np.sum(weights[:,None]*mol.r, axis=0)/np.sum(weights)
+def center_of_mass(mol, active=None, r=None):
+  active = mol.select(active) if active is not None else slice(None)
+  r = mol.r if r is None else r
+  return np.sum(l1normalize(mol.mass()[active,None])*r[active], axis=0)
 
 
 def calc_RMSD(mol1, mol2, atoms=None, sort=None, align=False, grad=False):
@@ -721,7 +739,7 @@ def alignment_matrix(subject, ref, weights=1.0):
   return np.dot(translation_matrix(-CMsubject), np.dot(to4x4(rot), translation_matrix(CMref)))
 
 
-def align_atoms(subject, ref, weights=1.0, sel=None):
+def align_atoms(subject, ref, sel=None, weights=1.0):
   """ return optimal alignment of points `subject` (or `subject`.r if a Molecule) to `target` (or `target`.r)
     with optional `weights`. A list of atoms indices `sel` to use for alignment can be passed
   """

@@ -1,4 +1,5 @@
 import numpy as np
+from ..basics import partial
 from ..data.elements import ELEMENTS
 from ..data.pdb_bonds import RESIDUE_HYDROPHOBICITY
 
@@ -78,6 +79,7 @@ def heat_colormap(t):
 
 
 # predefined colorings for atoms and residues
+# - http://jmol.sourceforge.net/jscolors/ - colors for atoms, residues, chains, etc.
 # following CSV is generated as described in elements.py, with
 #  ... select atomic_number, symbol cpk_color, jmol_color, molcas_gv_color from ...
 # Note that Speck uses jmol colors, QuteMol uses CPK colors; Chemlab colors same as CPK except C,N,O,S
@@ -227,6 +229,14 @@ RESIDUE_COLORS = {
   'DU': '#FF8080'
 }
 
+# from https://github.com/molstar/molstar/blob/master/src/mol-util/color/lists.ts
+_CHAIN_COLORS =  ['#1b9e77', '#d95f02', '#7570b3', '#e7298a', '#66a61e', '#e6ab02', '#a6761d', '#666666',
+  '#e41a1c', '#377eb8', '#4daf4a', '#984ea3', '#ff7f00', '#ffff33', '#a65628', '#f781bf', '#999999',
+  '#66c2a5', '#fc8d62', '#8da0cb', '#e78ac3', '#a6d854', '#ffd92f', '#e5c494', '#b3b3b3']
+
+CHAIN_COLORS = [ hex_to_rgba(c) for c in _CHAIN_COLORS ]
+
+
 def get_chains(mol):
   """ for molecule `mol`, return a dict: chain -> (start resnum, stop resnum + 1) """
   chains = {}
@@ -245,10 +255,10 @@ def color_by_element(mol, idxs, colors=CHEMLAB_COLORS):
   znucs = [mol.atoms[idx].znuc for idx in idxs]
   return colors[znucs]  #return colors.get(znuc) or colors.get(ELEMENTS[znuc].symbol) or CPK_COLORS[znuc]
 
-def color_by_chain(mol, idxs, colors):
+def color_by_chain(mol, idxs, colors=CHAIN_COLORS, offset=0):
   resnums = [mol.atoms[idx].resnum for idx in idxs]
-  chains = list(dict.fromkeys(res.chain for res in mol.residues))
-  return [colors[ chains.index(mol.residues[ii].chain) % len(colors) ] for ii in resnums]
+  chains = mol.chains
+  return [colors[ (chains.index(mol.residues[ii].chain) + offset) % len(colors) ] for ii in resnums]
 
 def color_by_residue(mol, idxs, colors={}):
   ress = [mol.residues[mol.atoms[idx].resnum].name for idx in idxs]
@@ -300,7 +310,8 @@ def coloring_mix(coloring1, coloring2, a):
   def wrapper(*args, **kwargs):
     c1 = coloring1(*args, **kwargs) if callable(coloring1) else coloring1
     c2 = coloring2(*args, **kwargs) if callable(coloring2) else coloring2
-    return c1*np.array([1-a, 1-a, 1-a, 1]) + c2*np.array([a, a, a, 0])
+    aa = np.outer(a(*args, **kwargs) if callable(a) else a, [1,1,1,0])
+    return c1*(1-aa) + c2*aa
   return wrapper
 
 # convert color to a shade of `base` color based on its luminosity (for molecule of the month style)
@@ -312,3 +323,21 @@ def coloring_monotone(coloring, base):
     Y = (0.2126*c[0] + 0.7152*c[1] + 0.0722*c[2])/255.0  # luminosity
     return (b[0]*Y, b[1]*Y, b[2]*Y, c[3])
   return wrapper
+
+
+## Common colorings
+
+COLORING_FNS = dict(
+  element=color_by_element,
+  chain=color_by_chain,
+  residue=color_by_residue,
+  resnum=color_by_resnum,
+  carbonchain=coloring_mix(color_by_element, color_by_chain, lambda mol,idxs: 0.4*(mol.znuc[idxs] == 6)),
+  resnumchain=coloring_mix(partial(color_by_resnum, colors=(Color.black, Color.white)), color_by_chain, 0.5),
+  motm=coloring_mix(color_by_element, color_by_chain, 0.85),  # molecule-of-the-month type coloring
+  mmq=scalar_coloring('mmq', [-1,1])
+)
+
+def color_by(coloring, colors=None):
+  coloring = COLORING_FNS[coloring] if type(coloring) is str else coloring
+  return partial(coloring, colors=colors) if colors is not None else coloring

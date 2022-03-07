@@ -61,7 +61,7 @@ class TriangleRenderer:
 
     vertices = np.asarray(vertices, dtype=np.float32)
     normals = np.asarray(normals, dtype=np.float32)
-    colors = np.asarray(colors, dtype=np.uint8)
+    colors = gl_colors(colors)  #np.asarray(colors, dtype=np.uint8)
     indices = np.asarray(indices, dtype=np.uint32)
     self.n_indices = np.size(indices)
 
@@ -70,7 +70,7 @@ class TriangleRenderer:
       glBindVertexArray(self.vao)
       self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT)
       self._norms_vbo = bind_attrib(self.shader, 'normal_in', normals, 3, GL_FLOAT)
-      self._color_vbo = bind_attrib(self.shader, 'color_in', colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
+      self._color_vbo = bind_attrib(self.shader, 'color_in', colors, 4)  #, GL_UNSIGNED_BYTE, GL_TRUE)
       self._elem_vbo = VBO(indices, target=GL_ELEMENT_ARRAY_BUFFER)
       self._elem_vbo.bind()
       glBindVertexArray(0)
@@ -154,6 +154,8 @@ class TubeMeshRenderer(TriangleRenderer):
     #axes = np.concatenate(([norm_axes[0]], avg_axes, [norm_axes[-1]]))
 
     radii = np.asarray(radii)
+    aspect_ratio = (radii[:,1]/radii[:,0])[:,None,None] if np.ndim(radii) == 2 else self.aspect_ratio
+    radii = radii = radii[:,0] if np.ndim(radii) == 2 else radii
     majors = np.asarray(orientations)
     minors = np.cross(majors, axes)
     minors = minors/(np.sqrt(np.sum(minors*minors, axis=-1))[:,None])
@@ -163,12 +165,12 @@ class TubeMeshRenderer(TriangleRenderer):
     # equivalent to tiling angles by n_axial and repeating everything else by n_radial
     cosmajors = np.cos(angles)[:,None]*(radii[:,None]*majors)[:,None]
     sinminors = np.sin(angles)[:,None]*(radii[:,None]*minors)[:,None]
-    vertices = centers[:,None] + cosmajors + self.aspect_ratio*sinminors
+    vertices = centers[:,None] + cosmajors + aspect_ratio*sinminors
     # these are vertex normals, which will get interpolated across faces and give smooth shading
-    normals = self.aspect_ratio*cosmajors + sinminors
+    normals = aspect_ratio*cosmajors + sinminors
     normals = normals/(np.sqrt(np.sum(normals*normals, axis=-1))[:,:,None])
     # colors
-    rep_colors = np.repeat(colors, nr, axis=0).astype(np.uint8)
+    rep_colors = np.repeat(colors, nr, axis=0)  #.astype(np.uint8)
     # indices to create triangle strip around each axial segment
     facet = np.array([0, nr, nr + 1, 0, nr + 1, 1])  # two triangles for quad for single facet
     hoop = facet + np.arange(nr)[:,None]  # note use of broadcasting
@@ -280,7 +282,7 @@ class LineRibbonRenderer:
     vertices = np.repeat(centers, 2, axis=0).astype(np.float32)
     prim_offsets = np.repeat(orientations, 2, axis=0).astype(np.float32)
     prim_radii = np.repeat(radii, 2, axis=0).astype(np.float32)
-    prim_colors = np.repeat(colors, 2, axis=0).astype(np.uint8)
+    prim_colors = gl_colors(np.repeat(colors, 2, axis=0))  #.astype(np.uint8)
     # indices for triangle strip for each chain
     chain_indices = 2*np.concatenate([np.arange(a, b-1) for a,b in zip(breaks, breaks[1:])])
     indices = np.array([0,1,2,2,1,3]) + chain_indices[:,None,None]  # note use of broadcasting
@@ -294,7 +296,7 @@ class LineRibbonRenderer:
       self._local_vbo = bind_attrib(self.shader, 'mapping', mapping, 1, GL_FLOAT)
       self._radii_vbo = bind_attrib(self.shader, 'ribbon_radius', prim_radii, 1, GL_FLOAT)
       self._offsets_vbo = bind_attrib(self.shader, 'offset_dir', prim_offsets, 3, GL_FLOAT)
-      self._color_vbo = bind_attrib(self.shader, 'color_in', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE)
+      self._color_vbo = bind_attrib(self.shader, 'color_in', prim_colors, 4)  #, GL_UNSIGNED_BYTE, GL_TRUE)
       self._elem_vbo = VBO(indices.astype(np.uint32), target=GL_ELEMENT_ARRAY_BUFFER)
       self._elem_vbo.bind()
       glBindVertexArray(0)
@@ -357,7 +359,7 @@ class VisBackbone:
       self.radius_fn = radius_fn if callable(radius_fn) else lambda mol, idx, r: r
     self.aspect_ratio = aspect_ratio
     self.untwist = untwist
-    self.coloring = (lambda *args: coloring(*args, colors=colors)) if colors is not None else coloring
+    self.coloring = color_by(coloring, colors)
     # color interpolation along trace
     self.color_interp = color_interp
     if color_interp == 'step':
@@ -443,7 +445,7 @@ class VisBackbone:
 
     chain_breaks.append(len(trace))
     color = self.coloring(mol, trace)
-    radii = [self.radius_fn(mol, ii, self.radius) for ii in trace]
+    radii = np.array([self.radius_fn(mol, ii, self.radius) for ii in trace])
     if self.style == 'tube':
       self.set_tube_data(r[trace], radii, color)
     else:

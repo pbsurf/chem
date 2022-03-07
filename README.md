@@ -2,8 +2,8 @@ chem: collection of mostly python code for molecular visualization, QM/MM, FEP, 
 
 Major features:
 - 3D visualization of molecular geometry, orbitals, ESP, etc.
- - fast OpenGL volume and isosurface rendering
- - oriented toward analysis and debugging of calculations rather than presentation
+  - fast OpenGL volume and isosurface rendering
+  - oriented toward analysis and debugging of calculations rather than presentation (for that, try [molstar](https://github.com/molstar/molstar))
 - QM/MM driver supporting electrostatic embedding with various charge shifting schemes
 - DLC/HDLC/Redundant internal coordinates
 - transition state search (Dimer method, Lanczos method), reaction path optimization (NEB)
@@ -35,6 +35,7 @@ See misc/chem-inst.sh for setup on Debian/Ubuntu
 
 Optionally:
 - [openmmtools](https://github.com/choderalab/openmmtools) - free energy calculations
+- [AmberTools](https://ambermd.org/AmberTools.php) - small molecule parameterization (GAFF)
 - [TINKER](https://dasher.wustl.edu/tinker/) - molecular mechanics calculations
 - GAMESS (US) or NWChem - quantum chemistry calculations
 - https://github.com/cclib/cclib - for reading GAMESS and NWChem output

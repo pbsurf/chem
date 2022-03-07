@@ -222,17 +222,17 @@ class StickRenderer:
     # get vertices and indices for a (0,0,0) - (1,1,1) cube
     local, indices = cube_triangles()
     bounds = np.asarray(bounds)  #, np.float32)
-    vertices = np.asarray(bounds[:, 0], np.float32)  #np.repeat(self.bounds[:, 0], 8, axis=0).astype(np.float32)
-    directions = np.asarray(bounds[:, 1] - bounds[:, 0], np.float32)  #np.repeat(..., 8, axis=0).astype(np.float32)
-    prim_radii = np.asarray(radii, np.float32)  #np.repeat(radii, 8, axis=0).astype(np.float32)
-    prim_colors = np.asarray(colors, np.uint8)  #np.repeat(colors, 8, axis=0).astype(np.uint8)
+    vertices = np.asarray(bounds[:, 0], np.float32)
+    directions = np.asarray(bounds[:, 1] - bounds[:, 0], np.float32)
+    prim_radii = np.asarray(radii, np.float32)
+    prim_colors = gl_colors(colors)  #np.asarray(colors, np.uint8)
     #local = np.tile(local, self.n_cylinders)
 
     if self.vao is None:
       self.vao = glGenVertexArrays(1)
       glBindVertexArray(self.vao)
       self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT, divisor=1)
-      self._color_vbo = bind_attrib(self.shader, 'color', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE, divisor=1)
+      self._color_vbo = bind_attrib(self.shader, 'color', prim_colors, 4, divisor=1)
       self._local_vbo = bind_attrib(self.shader, 'vert_local_coordinate', local, 3, GL_FLOAT)
       self._directions_vbo = bind_attrib(self.shader, 'cylinder_axis', directions, 3, GL_FLOAT, divisor=1)
       self._radii_vbo = bind_attrib(self.shader, 'cylinder_radius', prim_radii, 1, GL_FLOAT, divisor=1)
@@ -409,9 +409,9 @@ class BallRenderer:
       colors = [(0,0,0,0)]*len(radii)
     self.n_spheres = len(positions)
     # note that instanced drawing doesn't require any shader changes
-    vertices = np.asarray(positions, np.float32)  #np.repeat(positions, 6, axis=0).astype(np.float32)
-    radii = np.asarray(radii, np.float32)  #np.repeat(radii, 6, axis=0).astype(np.float32)
-    colors = np.asarray(colors, np.uint8)  #np.repeat(colors, 6, axis=0).astype(np.uint8)
+    vertices = np.asarray(positions, np.float32)
+    radii = np.asarray(radii, np.float32)
+    colors = gl_colors(colors)  #np.asarray(colors, np.uint8)
     # two triangles for a square
     mapping = np.asarray([
         1.0,1.0, -1.0,1.0, -1.0,-1.0,  # CCW triangle 1
@@ -422,7 +422,7 @@ class BallRenderer:
       self.vao = glGenVertexArrays(1)
       glBindVertexArray(self.vao)
       self._verts_vbo = bind_attrib(self.shader, 'position', vertices, 3, GL_FLOAT, divisor=1)
-      self._color_vbo = bind_attrib(self.shader, 'color', colors, 4, GL_UNSIGNED_BYTE, GL_TRUE, divisor=1)
+      self._color_vbo = bind_attrib(self.shader, 'color', colors, 4, divisor=1)
       self._mapping_vbo = bind_attrib(self.shader, 'at_mapping', mapping, 2, GL_FLOAT) # divisor=0
       self._radius_vbo = bind_attrib(self.shader, 'at_sphere_radius', radii, 1, GL_FLOAT, divisor=1)
       glBindVertexArray(0)
@@ -560,10 +560,10 @@ class LineRenderer:
       return
 
     bounds = np.asarray(bounds)
-    vertices = np.asarray(bounds[:, 0], np.float32)  #np.repeat(..., 6, axis=0)
-    directions = np.asarray(bounds[:, 1] - bounds[:, 0], np.float32)  #np.repeat(..., 6, axis=0)
-    prim_radii = np.asarray(radii, np.float32)  #np.repeat(..., 6, axis=0)
-    prim_colors = np.asarray(colors, np.uint8)  #np.repeat(..., 6, axis=0)
+    vertices = np.asarray(bounds[:, 0], np.float32)
+    directions = np.asarray(bounds[:, 1] - bounds[:, 0], np.float32)
+    prim_radii = np.asarray(radii, np.float32)
+    prim_colors = gl_colors(colors)  #np.asarray(colors, np.uint8)
     # two triangles for a square
     mapping = np.asarray([
         1.0,1.0, 0.0, 1.0, 0.0,-1.0,  # CCW triangle 1
@@ -577,7 +577,7 @@ class LineRenderer:
       self._local_vbo = bind_attrib(self.shader, 'mapping', mapping, 2, GL_FLOAT)
       self._directions_vbo = bind_attrib(self.shader, 'direction', directions, 3, GL_FLOAT, divisor=1)
       self._radii_vbo = bind_attrib(self.shader, 'line_radius', prim_radii, 1, GL_FLOAT, divisor=1)
-      self._color_vbo = bind_attrib(self.shader, 'color_in', prim_colors, 4, GL_UNSIGNED_BYTE, GL_TRUE, divisor=1)
+      self._color_vbo = bind_attrib(self.shader, 'color_in', prim_colors, 4, divisor=1)
       glBindVertexArray(0)
     else:
       # just update existing VBO for subsequent calls
@@ -612,14 +612,18 @@ class LineRenderer:
 # ball-and-stick?  separate radii for balls and sticks?
 class VisGeom:
 
-  def __init__(self, style='licorice', sel=None, radius=1.0, coloring=color_by_element, colors=None, cache=True):
+  def __init__(self, style='licorice', sel=None, radius=1.0, stick_radius=1.0, stick_color=Color.black, coloring=color_by_element, colors=None, cache=True):
     """ render atoms selected by `sel` with `style` ('licorice', 'lines', 'spacefill'), radius scale factor
       `radius`, and `coloring`/`colors`
     """
-    self.style, self.sel, self.radius, self.cache = style, sel, radius, cache
+    self.sel, self.radius, self.cache = sel, radius, cache
+    self.coloring = color_by(coloring, colors)
+    self.stick_coloring = (lambda mol,idx: [stick_color]*len(idx)) if style == 'ballstick' else self.coloring
+    self.stick_radius = stick_radius*(0.2 if style == 'ballstick' else 1.0)
+    # I don't want to add ballstick to mol_styles, so treat as special case of licorice
+    self.style = 'licorice' if style == 'ballstick' else style
     self.mol_styles = ['licorice', 'spacefill', 'lines']  # too hard to set initial style w/ itertools.cycles
     self.style_idx = self.mol_styles.index(style) if style in self.mol_styles else 0
-    self.coloring = (lambda *args: coloring(*args, colors=colors)) if colors is not None else coloring
     self.active, self.bonds, self.mol = None, None, None
     self.stick_renderer = StickRenderer() #ordered_draw=(opacity < 1.0))
     self.ball_renderer = BallRenderer()
@@ -656,7 +660,7 @@ class VisGeom:
 
     bounds = cyl_bounds(r_array, bonds)
     radii = np.full(len(bounds), radius)
-    colors = self.coloring(mol, bonds.reshape(-1))
+    colors = self.stick_coloring(mol, bonds.reshape(-1))
 
     # double bonds - inspired by ngl, but I mostly did this to provide a reason for avoiding cylinder caps
     ## TODO: need to use other bonds for atom to set orientation (dr)
@@ -669,7 +673,7 @@ class VisGeom:
         dr = np.cross(r1 - r0, [0, 0, 1])
         dr = (1 - dbl_scale) * radius * dr/norm(dr)
         dbl_bounds.append(cyl_bounds(np.array([r0+dr, r1+dr, r0-dr, r1-dr]), np.array([[0,1], [2,3]])))
-        dbl_colors.extend(self.coloring(mol, [i, j, i, j]))
+        dbl_colors.extend(self.stick_coloring(mol, [i, j, i, j]))
 
       dbl_bounds = np.concatenate(dbl_bounds)
       dbl_radii = [radius*dbl_scale] * len(dbl_bounds)
@@ -706,7 +710,8 @@ class VisGeom:
       activeset = frozenset(self.active) if self.sel is not None else None
       self.bonds = np.array(mol.get_bonds(activeset)) if self.bonds is None else self.bonds
       # no double bonds for now
-      cyl_bounds, cyl_radii, cyl_colors = self.cylinder_data(mol, self.bonds, self.r, atomnos, [], radius)
+      cyl_bounds, cyl_radii, cyl_colors = self.cylinder_data(
+          mol, self.bonds, self.r, atomnos, [], radius*self.stick_radius)
       if self.style == 'licorice':
         self.stick_renderer.set_data(cyl_bounds, cyl_radii, cyl_colors)
       elif self.style == 'lines':
@@ -730,6 +735,8 @@ class VisGeom:
       ball_colors = self.coloring(mol, self.active)
       if not np.isscalar(self.radius):
         ball_radii = self.radius if len(self.radius) == len(self.active) else self.radius[self.active]
+      elif self.stick_radius < 0.5:  # ball and stick
+        ball_radii = radius*np.where(atomnos[self.active] > 1, 1, 0.5)
       elif self.style == 'spacefill':
         ball_radii = [self.radius*ELEMENTS[atomnos[ii]].vdw_radius for ii in self.active]
       else:

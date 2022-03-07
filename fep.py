@@ -1,5 +1,6 @@
 import os, subprocess
 from .basics import *
+from .io.openmm import *
 
 # Refs:
 # - github.com/choderalab/pymbar - we should use pymbar for actual work
@@ -9,86 +10,24 @@ from .basics import *
 # - enthalpy and entropy (see pymbar or Tinker)
 
 
-# MM parameters for ligand
-# - proper way to do this is w/ AmberTools
-# - for this first try, we'll assign GAFF atoms types with Molden, use set_mm_params() to get GAFF parameters,
-#  set charges with RESP, then write all params to Tinker .key
-
-# if we install Psi4, try github.com/lilyminium/psiresp or github.com/cdsgroup/resp or github.com/psi4/psi4numpy
-def resp_prepare(mol, constr=[], avg=[], netcharge=0.0, maxiter=1000):
-  """ run HF/6-31G* ESP charge fitting with restraints toward q = 0 on znuc > 1 atoms, with sets of atoms
-    `constr` constrained to have same charge and charges of sets of atoms `avg` made equal by averaging after
-    fit; molecule is first relaxed for up to maxiter iterations
-  """
-  from .molecule import init_qmatoms
-  from .opt.optimize import moloptim
-  from .qmmm.qmmm1 import QMMM, pyscf_EandG
-  from .qmmm.resp import resp
-  # RESP charges
-  qmbasis = '6-31G*'  # standard basis for RESP
-  qmatoms = init_qmatoms(mol, '*', qmbasis)
-  if maxiter > 0:
-    qmmm = QMMM(mol, qmatoms=qmatoms, qm_charge=netcharge, prefix='no_logs')
-    res, r_qm = moloptim(qmmm.EandG, mol=mol, raiseonfail=False, maxiter=maxiter)
-    mol.r = r_qm
-  _, _, scn = pyscf_EandG(mol, qm_charge=netcharge)
-  mmq = resp(scn.base, equiv=constr, restrain=(mol.znuc > 1)*0.1, netcharge=netcharge)
-  for a in avg:
-    mmq[a] = np.mean(mmq[a])  # average charges of chemically equiv. atoms
-  mol.mmq = mmq
-  mol.prev_pyscf = scn
-  return mol
+# MM-GBSA binding energies ... poor man's alternative to FEP
+# - run MD in explicit solvent, then calculate Emm(lig + host) - Emm(lig) - Emm(host) in implicit solvent for
+#  each frame and take mean; for even greater economy, use single relaxed geometry instead of MD run
+# refs:
+# - https://www.tandfonline.com/doi/pdf/10.1517/17460441.2015.1032936
+def mmgbsa(mol, Rs, sel, ff):
+  selatoms = mol.select(sel)
+  EandG = OpenMM_EandG(mol.extract_atoms(selatoms), ff)
+  return np.array([ EandG(r[selatoms], grad=False)[0] for r in Rs ]) if np.ndim(Rs) > 2 \
+      else EandG(Rs[selatoms], grad=False)[0]
 
 
-def gaff_prepare(mol, constr=[], avg=[], mmtype0=801):
-  """ load GAFF parameters for mol with atom names as GAFF atom types, setting MM atom types to sequential
-    values starting from `mmtype0` (for Tinker) and run resp_prepare()
-  """
-  from .mm import load_amber_dat, set_mm_params
-  # amber parm files can be obtained from, e.g., github.com/choderalab/ambermini
-  gaff = load_amber_dat(DATA_PATH + '/amber/gaff.dat')
-  mol.mmtype = [a.name.upper() for a in mol.atoms]
-  set_mm_params(mol, gaff)
-  mol.mmtype = np.arange(mol.natoms) + mmtype0
-  return resp_prepare(mol, constr, avg)
-
-
-def solvate_prepare(mol, ff, T0, pad=6.0, solute_res=None, solvent_chain=None, neutral=False, eqsteps=5000):
-  from .molecule import Molecule, Atom
-  from .model.prepare import water_box, solvate
-  from .io.openmm import openmm, openmm_MD_context, openmm_load_params, UNIT
-  # make a cubic water box
-  side = np.max(np.diff(mol.extents(pad=pad), axis=0))
-  solvent = water_box(side)
-  # check radial distribution fn (min dist should be ~1.5 if overfill worked properly
-  if 0:
-    from chem.analysis import calcRDF
-    bins,rdf = calcRDF(solvent.r[solvent.znuc > 6], solvent.pbcbox)
-    plot(bins[:-1], rdf)
-
-  na_plus, cl_minus = None, None
-  if neutral:
-    # Amber names for Na, Cl
-    na_plus = Molecule(atoms=[Atom(name='Na+', znuc=11, r=[0,0,0], mmq=1.0)]).set_residue('Na+')
-    cl_minus = Molecule(atoms=[Atom(name='Cl-', znuc=17, r=[0,0,0], mmq=-1.0)]).set_residue('Cl-')
-    openmm_load_params(mol, ff=ff, charges=True)  # needed
-  # any point in doing equilibriation before solute is added?
-  mol.r = mol.r - np.mean(mol.extents(), axis=0)
-  solvated = solvate(mol, solvent, d=2.0,
-      solute_res=solute_res, solvent_chain=solvent_chain, ion_p=na_plus, ion_n=cl_minus)
-
-  # short equilibriation (now using OpenMM instead of Tinker)
-  solvated.r = solvated.r + 0.5*side  # OpenMM centers box at side/2 instead of origin
-  if eqsteps is not None:
-    ctx = openmm_MD_context(solvated, ff, T0)
-    openmm.LocalEnergyMinimizer.minimize(ctx, maxIterations=100)
-    if eqsteps > 0:
-      ctx.getIntegrator().step(eqsteps)
-    simstate = ctx.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)
-    solvated.r = simstate.getPositions(asNumpy=True).value_in_unit(UNIT.angstrom)
-    solvated.pbcbox = np.diag(simstate.getPeriodicBoxVectors(asNumpy=True).value_in_unit(UNIT.angstrom))
-    solvate.md_vel = simstate.getVelocities(asNumpy=True).value_in_unit(UNIT.angstrom/UNIT.picosecond)
-  return solvated
+# note that we can't do lig = ~host in mmgbsa() since for general case we have host + lig + solvent
+def dE_binding(mol, ff, host, lig, r=None):
+  if r is None: r = mol.r
+  selA, selI = mol.select(host), mol.select(lig)
+  eAI, eA, eI = [ mmgbsa(mol, r, sel, ff) for sel in [sorted(selA+selI), selA, selI] ]
+  return (eAI - eA - eI)*KCALMOL_PER_HARTREE  #np.mean() ... return array for better analysis
 
 
 # BAR (Bennett acceptance ratio) estimation of free energy difference
@@ -118,7 +57,7 @@ def bootstrap(fn, samps, niter=100):
 
 
 def fep(dE):
-  """ energy differences dE should be in units of kB*T """
+  """ FEP estimate of free energy difference from energy differences `dE`; everything in units of kB*T """
   return -np.log( np.sum(np.exp(-dE))/len(dE) )  # Zwanzig formula
 
 
@@ -184,36 +123,6 @@ def fep_results(dEup, dEdn, T0):
   print("BAR steps dF (kcal/mol): %s\nBAR steps ddF (kcal/mol): %s" % (dFs_bar[:,0], dFs_bar[:,1]))
 
 
-# much faster to use Tinker bar option 1 to calculate energies and write to .bar files:
-# dEup = E_{i+1}(r_i) - E_i(r_i), dEdn = E_i(r_i) - E_{i-1}(r_i) where i is lambda index
-def tinker_fep(nlambda, T0, warmup=2, autocorr=False):
-  dEup, dEdn = [], [0]
-  beta = 1/(KCALMOL_PER_HARTREE*BOLTZMANN*T0)  # Tinker energies are in kcal/mol
-  for ii in range(nlambda-1):
-    if not os.path.exists("fe%02d.bar" % ii):
-      subprocess.check_output([os.path.join(TINKER_PATH, "bar"),
-          "1", "fe%02d.arc" % ii, str(T0), "fe%02d.arc" % (ii+1), str(T0), "N"])
-    with open("fe%02d.bar" % ii, 'r') as f:
-      dE = np.zeros(int(f.readline().split()[0]))
-      for jj in range(len(dE)):
-        l = f.readline().split()
-        dE[jj] = beta*(float(l[2]) - float(l[1]))
-      dEup.append(dE[warmup:])
-      dE = np.zeros(int(f.readline().split()[0]))
-      for jj in range(len(dE)):
-        l = f.readline().split()
-        dE[jj] = beta*(float(l[1]) - float(l[2]))
-      dEdn.append(dE[warmup:])
-
-  # check for independent samples
-  if autocorr:
-    for ii in range(nlambda-1):
-      print("Integrated autocorr. time (%d): %f (fwd); %f (rev)"
-          % (ii, int_autocorr_time(dEup[ii]), int_autocorr_time(dEdn[ii+1])))
-
-  fep_results(dEup, dEdn, T0)  # already removed warmup samples
-
-
 # calcRDF(mol.r[mol.znuc > 1]) to exclude hydrogens
 def calcRDF(mol, pbcbox=None, nbins=200, maxdist=8):
   """ calculate radial pair distribution function, with optional periodic boundary conditions `pbcbox` """
@@ -242,3 +151,92 @@ def calcRDF(mol, pbcbox=None, nbins=200, maxdist=8):
   N = len(r)
   norm = N/2 * N/vol
   return bins, (1.0/norm)*hist/binvol
+
+
+def solvate_prepare(mol, ff=None, T0=None, pad=6.0, center=None,
+    solute_res=None, solvent_chain=None, neutral=False, eqsteps=5000):
+  from .molecule import Molecule, Atom
+  from .model.prepare import water_box, solvate
+  from .io.openmm import openmm, openmm_MD_context, openmm_load_params, UNIT
+  # make a cubic water box
+  side = np.max(np.diff(mol.extents(pad=pad), axis=0))
+  solvent = water_box(side)
+  solvent.r = solvent.r + 0.5*side  # OpenMM centers box at side/2 instead of origin
+
+  # check radial distribution fn (min dist should be ~1.5 if overfill worked properly
+  if 0:
+    from chem.analysis import calcRDF
+    bins,rdf = calcRDF(solvent.r[solvent.znuc > 6], solvent.pbcbox)
+    plot(bins[:-1], rdf)
+
+  na_plus, cl_minus = None, None
+  if neutral:
+    # Amber names for Na, Cl
+    na_plus = Molecule(atoms=[Atom(name='Na+', znuc=11, r=[0,0,0], mmq=1.0)]).set_residue('Na+')
+    cl_minus = Molecule(atoms=[Atom(name='Cl-', znuc=17, r=[0,0,0], mmq=-1.0)]).set_residue('Cl-')
+    openmm_load_params(mol, ff=ff, charges=True)  # needed
+  # any point in doing equilibriation before solute is added?
+  center = np.mean(mol.extents(), axis=0) if center is None else center
+  solvated = solvate(mol, solvent, r_solute=(mol.r - center + 0.5*side), d=2.0,
+      solute_res=solute_res, solvent_chain=solvent_chain, ion_p=na_plus, ion_n=cl_minus)
+
+  # short equilibriation (now using OpenMM instead of Tinker)
+  #solvated.r = solvated.r + 0.5*side  # OpenMM centers box at side/2 instead of origin
+  if eqsteps is not None:
+    ctx = openmm_MD_context(solvated, ff, T0, rigidWater=True)
+    openmm.LocalEnergyMinimizer.minimize(ctx, maxIterations=100)
+    if eqsteps > 0:
+      ctx.getIntegrator().step(eqsteps)
+    simstate = ctx.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)
+    solvated.r = simstate.getPositions(asNumpy=True).value_in_unit(UNIT.angstrom)
+    solvated.pbcbox = np.diag(simstate.getPeriodicBoxVectors(asNumpy=True).value_in_unit(UNIT.angstrom))
+    solvate.md_vel = simstate.getVelocities(asNumpy=True).value_in_unit(UNIT.angstrom/UNIT.picosecond)
+  return solvated
+
+
+## Old
+
+#from .io.tinker import tinker_fep
+
+# MM parameters for ligand
+# - proper way to do this is w/ AmberTools
+# - for this first try, we'll assign GAFF atoms types with Molden, use set_mm_params() to get GAFF parameters,
+#  set charges with RESP, then write all params to Tinker .key
+
+# if we install Psi4, try github.com/lilyminium/psiresp or github.com/cdsgroup/resp or github.com/psi4/psi4numpy
+def resp_prepare(mol, constr=[], avg=[], netcharge=0.0, maxiter=1000):
+  """ run HF/6-31G* ESP charge fitting with restraints toward q = 0 on znuc > 1 atoms, with sets of atoms
+    `constr` constrained to have same charge and charges of sets of atoms `avg` made equal by averaging after
+    fit; molecule is first relaxed for up to maxiter iterations
+  """
+  from .molecule import init_qmatoms
+  from .opt.optimize import moloptim
+  from .qmmm.qmmm1 import QMMM, pyscf_EandG
+  from .qmmm.resp import resp
+  # RESP charges
+  qmbasis = '6-31G*'  # standard basis for RESP
+  qmatoms = init_qmatoms(mol, '*', qmbasis)
+  if maxiter > 0:
+    qmmm = QMMM(mol, qmatoms=qmatoms, qm_charge=netcharge, prefix='no_logs')
+    res, r_qm = moloptim(qmmm.EandG, mol=mol, raiseonfail=False, maxiter=maxiter)
+    mol.r = r_qm
+  _, _, scn = pyscf_EandG(mol, qm_charge=netcharge)
+  mmq = resp(scn.base, equiv=constr, restrain=(mol.znuc > 1)*0.1, netcharge=netcharge)
+  for a in avg:
+    mmq[a] = np.mean(mmq[a])  # average charges of chemically equiv. atoms
+  mol.mmq = mmq
+  mol.prev_pyscf = scn
+  return mol
+
+
+def gaff_prepare(mol, constr=[], avg=[], mmtype0=801):
+  """ load GAFF parameters for mol with atom names as GAFF atom types, setting MM atom types to sequential
+    values starting from `mmtype0` (for Tinker) and run resp_prepare()
+  """
+  from .mm import load_amber_dat, set_mm_params
+  # amber parm files can be obtained from, e.g., github.com/choderalab/ambermini
+  gaff = load_amber_dat(DATA_PATH + '/amber/gaff.dat')
+  mol.mmtype = [a.name.upper() for a in mol.atoms]
+  set_mm_params(mol, gaff)
+  mol.mmtype = np.arange(mol.natoms) + mmtype0
+  return resp_prepare(mol, constr, avg)

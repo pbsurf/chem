@@ -11,6 +11,7 @@ from .color import *
 # - try original SSAO, since biggest problem with SAO is that noise is in screen space!  Also, I think
 #  random points in camera/world space might be a better fit for spacefilling geom - which is very different
 #  from typical 3D graphics geometry - than screen space.  Implement depth-aware blur pass if necessary
+#  e.g. https://github.com/molstar/molstar/blob/master/src/mol-gl/shader/ssao.frag.ts
 # - try setting extents only when molecule changes ... maybe less SAO noise when rotating
 # See:
 # - https://github.com/glumpy/glumpy/blob/master/examples/protein-ssao.py

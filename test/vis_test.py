@@ -122,10 +122,14 @@ if 0:
       VisBackbone(style='tube', atoms=['CA'], coloring=color_by_residue, color_interp='step') ]) ],
     bg_color=Color.black).run()
 
+  # ball and stick
+  vis = Chemvis(Mol(Files(DATA_PATH + '/pdb/1CE5.pdb', hydrogens=True), [VisGeom(style='licorice', sel='protein', stick_radius=0.35, coloring='carbonchain') ]), fog=True).run()
+
+  # ball and stick, solid color sticks, no shading
+  vis = Chemvis(Mol(Files('1CE5.pdb', hydrogens=True), [VisGeom(style='ballstick', sel='protein', coloring='carbonchain') ]), shading=LightingShaderModule(shading='none', outline_strength=8.0), bg_color=Color.white).run()
+
   # cartoon shading/"molecule-of-the-month" - e.g. https://pdb101.rcsb.org/motm/213 (typically no hydrogens)
-  Chemvis(Mol(Files('1CE5.pdb'), [
-    VisGeom(style='spacefill', sel='protein', coloring=coloring_mix(color_by_element, Color.cyan, 0.85)) ]),
-    shading=LightingShaderModule(shading='none', outline_strength=8.0), bg_color=Color.white).run()
+  vis = Chemvis(Mol(Files('1CE5.pdb'), [VisGeom(style='spacefill', sel='protein and znuc > 1', coloring='motm') ]), shading=LightingShaderModule(shading='none', outline_strength=4.0), effects=[AOEffect(nsamples=70)], bg_color=Color.white).run()
 
   # ambient occlusion
   Chemvis(Mol(Files('1CE5.pdb', hydrogens=True), [ VisGeom(style='spacefill') ]),
@@ -134,6 +138,14 @@ if 0:
   # Cutinase - esterase w/ classic SER, HIS, ASP catalytic triad
   vis = Chemvis(Mol(Files('1CEX.pdb', hydrogens=True), [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, colors=None, color_interp='ramp'), VisGeom(style='lines', sel='extbackbone'), VisGeom(style='lines', sel='sidechain') ]), fog=True).run()
   vis.select("/A/120,175,188/~C,N,CA,O,H,HA")  # catalytic triad sidechains
+
+  # pseudo-cartoon
+  # see github.com/boscoh/pyball/blob/master/pyball.py to get started w/ real cartoon
+  mol = add_hydrogens(load_molecule('2CHT.pdb').extract_atoms('/A,B,C//'))
+  ss = secondary_structure(mol)
+  ssrad = {'': [0.2, 0.2], 'H': [0.5, 0.0625], 'G': [0.5, 0.0625], 'E': [0.8, 0.1]}
+  radfn = lambda mol, idx, r: np.array(ssrad[ss[mol.atoms[idx].resnum]])
+  vis = Chemvis(Mol(mol, [VisBackbone(style='tubemesh', disulfides='line', coloring='resnumchain', radius_fn=radfn), VisGeom(sel='protein', coloring='carbonchain'), VisGeom(style='spacefill', sel=ligin)]), fog=True).run()
 
   # align each molecule to a reference
 def test_trypsin_1():

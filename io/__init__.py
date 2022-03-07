@@ -3,22 +3,21 @@ import numpy as np
 
 from ..basics import *
 from ..molecule import Molecule, Residue, guess_bonds, center_of_mass
-from .pdb import parse_pdb, copy_residues, write_pdb
-from .tinker import parse_xyz, parse_mol2, write_xyz, write_tinker_xyz, load_tinker_params, make_tinker_key
+from .pdb import parse_pdb, copy_residues, write_pdb, download_pdb
+from .xyz import parse_xyz, parse_mol2, write_xyz, write_tinker_xyz
 
 
-def cclib_open(filename):
-  from cclib.io import ccopen  # this is what is creating pyquante.log (see PyQuante/settings.py)
-  c = ccopen(filename, loglevel=logging.ERROR).parse()
-  if hasattr(c, 'errormsg'):
-    print("QM log file %s reports error %s" % (filename, c.errormsg))
-  return c
-
-
-def load_molecule(file, postprocess=None, center=False, charges=False, residue=None, **kwargs):
+def load_molecule(file, postprocess=None, center=False, charges=False, residue=None, download=False, **kwargs):
   filename = None if '\n' in file else file
-  fileext = filename.split('.')[-1].lower() if filename is not None else ''
-  if fileext == 'pdb' or file.startswith('HEADER'):
+  fileext = os.path.splitext(filename)[-1] if filename is not None else ''
+  if len(file) == 4 and not fileext:  # PDB ID
+    filename = os.path.join(DATA_PATH, 'pdb/', file + '.pdb')
+    if not os.path.exists(filename) and download:
+      download_pdb(file, dir=os.path.join(DATA_PATH, 'pdb/'))
+    mol = parse_pdb(filename, **kwargs)
+  elif fileext == 'pdb':
+    mol = parse_pdb(file, **kwargs)
+  elif file.startswith('HEADER'):
     mol = parse_pdb(file, **kwargs)
   elif fileext == 'mol2' or file.startswith("@<TRIPOS>MOLECULE"):
     mol = parse_mol2(file)
@@ -42,24 +41,12 @@ def load_molecule(file, postprocess=None, center=False, charges=False, residue=N
   return postprocess(mol) if callable(postprocess) else mol
 
 
-# cclib is at least talking about doing the sane thing and supporting atomic units: https://github.com/cclib/cclib/issues/89
-# I think this should be implemented by removing all inline conversions and instead having log file parser
-#  add fields to object specifying units - typically it would only have to indicate length and energy, other
-#  other units being inferred - but could specify explicit units for any field.  There would be a parse()
-#  option to convert to desired units
-
-def cclib_EandG(mol_cc, grad=True):
-  """ return energy (at highest level of theory avail) and optionally gradient of energy from cclib object
-    Assumes gradient from cclib is in Hartree/Bohr, as is the case for GAMESS.
-  """
-  try:
-    Eqm = mol_cc.scfenergies[-1]
-    Eqm = mol_cc.mpenergies[-1][-1]
-    Eqm = mol_cc.ccenergies[-1]
-  except: pass
-  Eqm /= EV_PER_HARTREE
-
-  return Eqm, (mol_cc.grads[-1]/ANGSTROM_PER_BOHR if grad else None)
+def cclib_open(filename):
+  from cclib.io import ccopen  # this is what is creating pyquante.log (see PyQuante/settings.py)
+  c = ccopen(filename, loglevel=logging.ERROR).parse()
+  if hasattr(c, 'errormsg'):
+    print("QM log file %s reports error %s" % (filename, c.errormsg))
+  return c
 
 
 # alternatives to hdf5 include Numpy format (.npy, .npz) and netCDF (based on HDF5, built-in support in scipy)

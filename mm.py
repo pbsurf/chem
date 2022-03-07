@@ -379,6 +379,61 @@ def lj_atom(idx, r, r0, depth):
   return Elj, Glj
 
 
+## move this stuff to mm/amber.py
+_tleap_in = """source leaprc.gaff
+mods = loadAmberParams mol.frcmod
+mol = loadMol2 mol.mol2
+saveAmberParm mol mol.prmtop mol.inpcrd
+quit"""
+
+#from openmm.app.amberprmtopfile import AmberPrmtopFile
+#AmberPrmtopFile("{0}.prmtop".format(res)).createSystem()
+
+# refs:
+# - AmberTools manual
+# - http://ambermd.org/tutorials/basic/tutorial4b/
+# - https://docs.bioexcel.eu/2020_06_09_online_ambertools4cp2k/
+# - https://github.com/ParmEd/ParmEd/issues/1109
+def antechamber_prepare(mol, res, netcharge=0):
+  import parmed
+  dir = '{0}_amber'.format(res)
+  os.mkdir(dir)
+  os.chdir(dir)
+  write_pdb(mol, 'mol.pdb')
+  os.system("antechamber -i mol.pdb -fi pdb -o mol.mol2 -fo mol2 -c bcc -nc %d -s 2" % netcharge)
+  os.system("parmchk2 -i mol.mol2 -f mol2 -o mol.frcmod")
+  write_file("mol.tleap.in", _tleap_in)
+  os.system("tleap -f mol.tleap.in")
+  # now load with parmed to convert to OpenMM XML
+  amber = parmed.load_file('mol.prmtop', 'mol.inpcrd')
+  # unique_atom_types needed to prevent openmm errors when loading multiple force field files
+  omm = parmed.openmm.OpenMMParameterSet.from_parameterset(
+      parmed.amber.AmberParameterSet.from_structure(amber), unique_atom_types=True)
+  #omm = parmed.openmm.OpenMMParameterSet.from_structure(amber)
+  omm.residues.update(parmed.modeller.ResidueTemplateContainer.from_structure(amber).to_library())
+  os.chdir('..')
+  omm.write('%s.ff.xml' % res)
+  amber.save('%s.mol2' % res)  #  seems mol2 is the only format for which parmed will include bonds
+  return amber
+
+
+# assign simple gaff types to allow for basic relaxation (e.g., as starting point for QM geom optim)
+# try Tinker basic.prm force field?
+def gaff_trivial(mol):
+  for a in mol.atoms:
+    conn = [mol.atoms[jj].znuc for jj in a.mmconnect]
+    if a.znuc == 1:
+      a1 = mol.atoms[a.mmconnect[0]]
+      if a1.znuc == 6:
+        elewd = sum(mol.atoms[jj].znuc in [7,8,9,17,35] for jj in a1.mmconnect)
+        a.mmtype = ['hc','h1','h2','h3'][elewd]
+      else:
+        a.mmtype = {7:'hn', 8:'ho'}[a1.znuc]
+    elif a.znuc == 6: a.mmtype = [None,'c1','c2','c3'][len(conn)-1]
+    elif a.znuc == 7: a.mmtype = ['n1','n2','n3','n4'][len(conn)-1]
+    elif a.znuc == 8: a.mmtype = 'o' if len(conn) == 1 else 'oh' if 1 in conn else 'os'
+
+
 # AMBER parameter (dat) file notes:
 # - multiple torsion terms get separate lines (negative value of periodicity for all but the last)
 # - ref: https://github.com/ParmEd/ParmEd/blob/master/parmed/amber/parameters.py

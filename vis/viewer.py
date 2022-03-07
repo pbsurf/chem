@@ -18,6 +18,9 @@ from .glutils import *
 
 class GLFWViewer:
   inited = False
+  # try to reuse window, since deleting and recreating randomly crashes in glfwCreateWindow ->
+  #  glfwRefreshContextAttribs -(first call)-> glfwMakeContextCurrent -> previous.context.makeCurrent attempt
+  cachedwin = None
 
   def __init__(self, camera, bg_color=(255,255,255,255)):
     """ callbacks to be set by caller after creating GLFWViewer object: user_on_key, user_on_click,
@@ -44,15 +47,23 @@ class GLFWViewer:
     if not GLFWViewer.inited:
       glfwInit()
       GLFWViewer.inited = True
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
-    # this disables deprecated functionality
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+    if GLFWViewer.cachedwin is not None:
+      window, GLFWViewer.cachedwin = GLFWViewer.cachedwin, None
+      glfwShowWindow(window)
+    else:
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3)
+      glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3)
+      glfwWindowHint(GLFW_SRGB_CAPABLE, RendererConfig.sRGB)
+      # this disables deprecated functionality
+      glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE)
+      window = glfwCreateWindow(640, 480, str.encode("Chemvis"), None, None)
 
-    window = glfwCreateWindow(640, 480, str.encode("Chemvis"), None, None)
     self.window = window
     glfwMakeContextCurrent(window)
     #glfwSwapInterval(1)  # vsync
+    if RendererConfig.sRGB:
+      glEnable(GL_FRAMEBUFFER_SRGB)
+    self.colortextype = GL_SRGB8_ALPHA8 if RendererConfig.sRGB else GL_RGBA
 
     # setup callbacks
     glfwSetWindowSizeCallback(window, self.on_resize)
@@ -93,6 +104,7 @@ class GLFWViewer:
         self.user_animate()
         self.should_repaint = True
     glfwHideWindow(window)
+    glfwSetWindowShouldClose(window, 0)  # clear close flag
     #glDeleteTextures(list(self.fb_textures.values()))
     self.terminate()
     print("GLFWViewer event loop stopped")
@@ -105,8 +117,9 @@ class GLFWViewer:
       #glfwTerminate() -- only if used for final exit, not per window as currently!
       #from OpenGL import contextdata;  contextdata.cleanupContext()  #contextdata.getContext()
       self.user_finish()
-      glfwDestroyWindow(self.window)
-      self.window = None
+      if GLFWViewer.cachedwin is not None:
+        glfwDestroyWindow(GLFWViewer.cachedwin)  #self.window)
+      GLFWViewer.cachedwin, self.window = self.window, None
 
 
   def render(self):
@@ -124,7 +137,7 @@ class GLFWViewer:
     else:
       glDeleteTextures(list(self.fb_textures.values()))  # values() is a dictionary view object in Python 3
     # create textures
-    color_tex = create_texture(width, height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE)
+    color_tex = create_texture(width, height, self.colortextype, GL_RGBA, GL_UNSIGNED_BYTE)
     # GL_RGB, i.e., three-bytes written with gl_FragData[1].xyz = ... doesn't seem to work in VMware
     # - and with GL_RGBA for 0 and GL_RGB for 1, writing to gl_FragColor crashes VMware
     normal_tex = create_texture(width, height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE)
@@ -162,7 +175,7 @@ class GLFWViewer:
   # workaround for a crazy bug that breaks volume rendering w/ updated vmware and/or host graphics drivers
   def swap_color_tex(self):
     if 'color_2' not in self.fb_textures:
-      self.fb_textures['color_2'] = create_texture(self.width, self.height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE)
+      self.fb_textures['color_2'] = create_texture(self.width, self.height, self.colortextype, GL_RGBA, GL_UNSIGNED_BYTE)
     self.fb_textures['color'], self.fb_textures['color_2'] = \
         self.fb_textures['color_2'], self.fb_textures['color']
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.fb_textures['color'], 0)
@@ -225,7 +238,7 @@ class GLFWViewer:
     glBindFramebuffer(GL_FRAMEBUFFER, 0 if to_screen else self.fbo)
     if not to_screen:
       if 'color_2' not in self.fb_textures:
-        self.fb_textures['color_2'] = create_texture(self.width, self.height, GL_RGBA, GL_RGBA, GL_UNSIGNED_BYTE)
+        self.fb_textures['color_2'] = create_texture(self.width, self.height, self.colortextype, GL_RGBA, GL_UNSIGNED_BYTE)
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, self.fb_textures['color_2'], 0)
       if self.curr_pass != 'postprocess':
         # no depth write or depth test for postprocess

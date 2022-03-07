@@ -9,7 +9,7 @@ from ..model.build import add_hydrogens
 from .viewer import GLFWViewer
 from ..external.glfw import GLFW_KEY_BACKSPACE, GLFW_KEY_F1, GLFW_KEY_HOME
 from .camera import Camera
-from .glutils import *
+from .glutils import RendererConfig, ray_spheres_intersection
 from .color import *
 from .shading import LightingShaderModule
 from .mol_renderer import VisGeom, LineRenderer, BallRenderer, StickRenderer
@@ -21,10 +21,11 @@ from .postprocess import GammaCorrEffect, AOEffect, OutlineEffect, DOFEffect, Fo
 # Notes and example moved to ../test/vis_test.py
 
 class Chemvis:
+  prev_view = None
 
   def __init__(self, children, effects=[], shading='phong', shadows=False, fog=False, bg_color=Color.black,
       wrap=False, timing=False, threaded=True, step_singles=False, drag_atoms=False, lock_orientation=False,
-      refresh_sel=False, verbose=False):
+      refresh_sel=False, restore_view=True, sRGB=True, verbose=False):
     """ create Chemvis instance, with list of Mol objects in `children`; can also pass tuple of Molecules to
       display simultaneously or list of Molecules to display sequentially
       Options:
@@ -50,9 +51,10 @@ class Chemvis:
     self.n_mols = 0
     self.mol_number = 0
     bg_color = decode_color(bg_color)
+    RendererConfig.sRGB = sRGB
     # camera and viewer
     self.camera = Camera(lock_orientation=lock_orientation)
-    self.initial_view = None
+    self.initial_view = Chemvis.prev_view if restore_view else None
     self.viewer = GLFWViewer(self.camera, bg_color=bg_color)
     self.viewer.user_on_key = self.on_key_press
     self.viewer.user_on_click = self.on_click
@@ -67,15 +69,16 @@ class Chemvis:
 
     # lighting config shared by geometry renderers
     if type(shading) is str:
+      fog_density = 0.0 if not fog else 0.2 if sRGB else 0.1
       RendererConfig.shading = LightingShaderModule(light_dir=[0.0, 0.0, 1.0], shading=shading,
-          shadow_strength=(0.8 if shadows else 0), fog_color=bg_color, fog_density=0.1 if fog else 0.0)
+          shadow_strength=(0.8 if shadows else 0), fog_color=bg_color, fog_density=fog_density)
     else:
       RendererConfig.shading = shading
     self.shadows = shadows
     # atom selection
     self.selection_renderer = BallRenderer()
     self.selection = []
-    self.sel_color = (0, 255, 0, 128)
+    self.sel_color = (0, 255, 0, 180)
     # wrap postprocess effects that are modules with PostprocessHost; this should probably be moved elsewhere
     self.effects = []
     modules = []
@@ -165,6 +168,7 @@ IO: slower/faster animation
     if make_default:
       self.initial_view = self.camera.state()
     self.viewer.repaint(wake=True)
+    return self  # for chaining
 
 
   def get_n_mols(self):
@@ -216,6 +220,8 @@ IO: slower/faster animation
       self.camera.autozoom(self.children[0].mol.r, min_dist=20)
       self.camera.mouse_zoom(1.0)  # a little extra zoom
       self.initial_view = self.camera.state()
+    else:
+      self.camera.restore(self.initial_view)
     if self.threaded:
       # run viewer event loop on separate thread so interpreter remains available
       t = threading.Thread(target=self.viewer.run)
@@ -236,6 +242,7 @@ IO: slower/faster animation
 
   def on_finish(self):
     """ clear references to allow for GC (to prevent undesired printing when exiting python) """
+    Chemvis.prev_view = self.camera.state()
     self.children = None
     self.viewer = None
 
@@ -482,7 +489,7 @@ class Mol:
     self.r = ([r] if np.ndim(r) == 2 else r) if renderers is not None and r is not None else None
     renderers = r if renderers is None else renderers
     self.mols = [mols] if hasattr(mols, 'r') else mols  # support anything with a .r attribute; len(dict) >= 0
-    self.renderers = renderers if type(renderers) is list else [renderers]
+    self.renderers = [VisGeom()] if renderers is None else renderers if type(renderers) is list else [renderers]
     self.focused = focused
     self.visible = visible
     self.update_mol = update_mol
@@ -610,7 +617,7 @@ class VisVectors:
       colors = (lambda x: [Color.red, Color.green, Color.blue]) if colors is None else colors
     self.vec_fn = vec_fn
     self.radius = 1.5 if style == 'lines' else 0.05
-    self.colors = Color.light_grey if colors is None else colors
+    self.colors = Color.yellow if colors is None else colors
     self.style = style
     self.renderer = LineRenderer() if style == 'lines' else StickRenderer()
 

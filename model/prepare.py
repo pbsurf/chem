@@ -140,15 +140,16 @@ def water_box(sides, mmtypes=None):
 # solvent molecules are assumed to be placed at random independent positions, so that we can just replace
 #  first N solvent molecules with ions to neutralize system (if ion_p and/or ion_n are provided)
 # - alternatively, we could just choose solvent molecules for replacement randomly
-def solvate(mol, solvent, d=3.0, ion_p=None, ion_n=None, solute_res=None, solvent_chain=None):
+def solvate(mol, solvent, r_solute=None, d=3.0, ion_p=None, ion_n=None, solute_res=None, solvent_chain=None):
   """ combine molecules `mol` and `solvent`, removing any residues in `solvent` within `d` Ang of `mol` """
-  kd = cKDTree(mol.r)
+  if r_solute is None: r_solute = mol.r
+  kd = cKDTree(r_solute)
   # could try a prefiltering step using mol.extents
   dists, locs = kd.query(solvent.r, distance_upper_bound=d)
   remove = set([solvent.atoms[ii].resnum for ii,dist in enumerate(dists) if dist < d])
 
   solvated = Molecule(pbcbox=solvent.pbcbox)  #, header=mol.header + " in " + solvent.header)
-  solvated.append_atoms(mol, residue=solute_res)
+  solvated.append_atoms(mol, r=r_solute, residue=solute_res)
   if ion_p or ion_n:
     # solvent assumed to be neutral for now
     net_charge = round(np.sum(mol.mmq))  # + np.sum(solvent.mmq)

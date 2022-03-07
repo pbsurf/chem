@@ -6,6 +6,22 @@ from ..data.elements import ELEMENTS
 
 GAMESS_PATH = os.getenv('GAMESS_PATH', '')
 
+
+# see https://github.com/cclib/cclib/issues/89 regarding units
+def cclib_EandG(mol_cc, grad=True):
+  """ return energy (at highest level of theory avail) and optionally gradient of energy from cclib object
+    Assumes gradient from cclib is in Hartree/Bohr, as is the case for GAMESS.
+  """
+  try:
+    Eqm = mol_cc.scfenergies[-1]
+    Eqm = mol_cc.mpenergies[-1][-1]
+    Eqm = mol_cc.ccenergies[-1]
+  except: pass
+  Eqm /= EV_PER_HARTREE
+
+  return Eqm, (mol_cc.grads[-1]/ANGSTROM_PER_BOHR if grad else None)
+
+
 # alternative is to convert text from nwchem format without parsing values - see r. 158 for untested impl
 def to_gamess_basis(basis, znuc=None):
   """ write basis set in cclib or pyscf format to GAMESS format for single atom; since support for named basis

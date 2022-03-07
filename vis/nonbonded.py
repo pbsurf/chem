@@ -2,10 +2,10 @@ import os, time, subprocess
 import numpy as np
 
 from ..basics import *
-from ..molecule import select_atoms
-from ..io.tinker import write_tinker_xyz, read_tinker_interactions, TINKER_PATH
+from ..data.pdb_data import PDB_PROTEIN
 from .color import *
 from .mol_renderer import LineRenderer
+#from ..io.tinker import tinker_contacts, tinker_E_breakdown
 
 
 ## Hydrogen bonds
@@ -67,6 +67,39 @@ def find_h_bonds(mol, max_dist=3.2, min_angle=120, max_energy=None):
   return (hbonds, np.array(energies)) if max_energy is not None else hbonds
 
 
+# secondary structure determination - from github.com/boscoh/pyball/blob/master/pyball.py
+# - DSSP is standard method for this and uses a specific formula for H-bond detection, see
+#  en.wikipedia.org/wiki/DSSP_(hydrogen_bond_estimation_algorithm)
+# - we need to enforce a minimum length (i.e. num of residues) for secondary structure features
+def secondary_structure(mol):
+  """ return list of secondary structure type (DSSP convention) for residues of mol """
+  hb = set()
+  for h,acc in find_h_bonds(mol):
+    if (mol.atoms[h].name == 'H' and mol.atoms[acc].name == 'O' and mol.atomres(h).name in PDB_PROTEIN
+        and mol.atomres(acc).name in PDB_PROTEIN and mol.atomres(h).chain == mol.atomres(acc).chain):
+      hb.add( (mol.atoms[h].resnum, mol.atoms[acc].resnum) )
+      hb.add( (mol.atoms[acc].resnum, mol.atoms[h].resnum) )
+  ss = np.array(['']*mol.nresidues)
+  for ii in range(mol.nresidues):
+    if (ii, ii+4) in hb and (ii+1, ii+5) in hb:
+      ss[ii+1:ii+5] = 'H'  # alpha-helix
+    if (ii, ii+3) in hb and (ii+1, ii+4) in hb:
+      ss[ii+1:ii+4] = 'G'  # 3-10 helix
+    for jj in range(ii+6,mol.nresidues):  #list(range(0,ii-5)) + list(range(ii+6,mol.nresidues))
+      if (ii,jj) in hb:
+        # parallel beta sheet
+        if (ii-2, jj-2) in hb:
+          ss[ [ii-2, ii-1, ii, jj-2, jj-1, jj] ] = 'E'
+        if (ii+2, jj+2) in hb:
+          ss[ [ii+2, ii+1, ii, jj+2, jj+1, jj] ] = 'E'
+        # anti-parallel beta sheet
+        if (ii-2, jj+2) in hb:
+          ss[ [ii-2, ii-1, ii, jj+2, jj+1, jj] ] = 'E'
+        if (ii+2, jj-2) in hb:
+          ss[ [ii+2, ii+1, ii, jj-2, jj-1, jj] ] = 'E'
+  return ss  #.tolist()
+
+
 # H-bond fns for VisContacts
 
 def hbond_contacts(mol):
@@ -81,36 +114,6 @@ def hbonds_color_by_energy(mol):
   return color_ramp([Color.blue, Color.red], mol.hbond_energies/(-100.0/KJMOL_PER_HARTREE))
 
 
-# Tinker energy breakdown fns for VisContacts
-
-# lots of duplication with tinker_EandG - we can try to refactor later
-# - maybe make a context manager so we can do: `with Tempfiles(prefix+".xyz", prefix+".key") as mminp, mmkey:`
-def tinker_E_breakdown(mol, key, r=None, sel=None, prefix=None, cutoff=5.0):
-  if prefix is None:
-    prefix = "mmtmp_%d" % time.time()
-    cleanup = True
-  mminp = prefix + ".xyz"
-  mmkey = prefix + ".key"
-  write_tinker_xyz(mol, mminp, r=r)  #title=title)
-  with open(mmkey, 'w') as f:
-    f.write(key)
-    f.write('cutoff %f\n' % cutoff)
-    if sel is not None:
-      active = select_atoms(mol, sel)
-      f.write("\n".join("active  " + " ".join("%d" % x for x in chunk) for chunk in chunks(active, 10)))
-
-  # for some reason Tinker analyze D prints bond and angle terms to stderr instead of stdout
-  s = subprocess.check_output([os.path.join(TINKER_PATH, "analyze"), mminp, "D"], stderr=subprocess.STDOUT)
-  Eindv = read_tinker_interactions(s)
-  if cleanup:
-    try:
-      os.remove(mminp)
-      if key is not None:
-        os.remove(mmkey)
-    except: pass
-  return Eindv
-
-
 def NCMM_contacts(mol, r=None, sel=None, Ethresh=-10.0/KCALMOL_PER_HARTREE):
   from ..mm import NCMM
   E = {}
@@ -121,15 +124,6 @@ def NCMM_contacts(mol, r=None, sel=None, Ethresh=-10.0/KCALMOL_PER_HARTREE):
   mol.Ebreakdown = { 'charge': {(i,j): E['Eqq'][i,j] for i,j in pairs},
       'vdw-lj': {(i,j): E['Evdw'][i,j] for i,j in pairs} }
   return pairs
-
-
-# kB*T is ~ 0.6 kcal/mol
-def tinker_contacts(mol, key=None, r=None, sel=None, Ethresh=-10.0/KCALMOL_PER_HARTREE):
-  if not hasattr(mol, 'Ebreakdown') or r is not None:
-    mol.Ebreakdown = tinker_E_breakdown(mol, key=key, r=r, sel=sel)
-  pairs = list(set(mol.Ebreakdown['charge'].keys() + mol.Ebreakdown['vdw-lj'].keys()))
-  return [ pair for pair in pairs \
-      if mol.Ebreakdown['charge'].get(pair, 0) + mol.Ebreakdown['vdw-lj'].get(pair, 0) < Ethresh ]
 
 
 def contacts_radii(mol, atoms):

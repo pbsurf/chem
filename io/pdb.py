@@ -15,16 +15,26 @@ import numpy as np
 import os, subprocess, copy
 
 from ..basics import setattrs, read_file
-from ..molecule import Atom, Residue, Molecule, guess_bonds, get_header
+from ..molecule import Atom, Residue, Molecule, guess_bonds
 from ..data.elements import ELEMENTS
-from ..data.pdb_bonds import *
+from ..data.pdb_data import *
+from .xyz import get_header
 
 TWO_LETTER_ELEMENTS = frozenset([ELEMENTS[z].symbol.upper() for z in range(1, 83) if len(ELEMENTS[z].symbol) == 2])
 DUMMY_ATOM = Atom(name='X', znuc=0, mmconnect=[])
 
 
+def download_pdb(id, dir=''):
+  """ download PDB `id` from RCSB to directory `dir` (default: current directory) """
+  assert len(id) == 4, "Invalid PDB ID"
+  dest = os.path.join(dir, id + ".pdb.gz")
+  # piping through gunzip directly creates problem of removing file on error
+  os.system("wget -O {1} https://files.rcsb.org/download/{0}.pdb.gz && gunzip {1}".format(id, dest))
+
+
 def apply_pdb_bonds(mol):
   """ populate atom.mmconnect lists with bonds for standard PDB residues """
+  from ..data.pdb_bonds import PDB_BONDS
   prevCidx, prevO3idx, prev_chain = None, None, None
   for residx, residue in enumerate(mol.residues):
     if residue.chain != prev_chain:
@@ -81,6 +91,7 @@ def copy_residues(mol, mol_pdb):
   """
   # original idea was to get argsort() mol.r and mol_pdb.r, but np.argsort doesn't take a key fn!
   from scipy.spatial.ckdtree import cKDTree
+  from ..data.pdb_bonds import PDB_BONDS
   ck = cKDTree(mol_pdb.r)  # more efficient to build kd-tree with smaller set and query with larger set
   dists, locs = ck.query(mol.r, distance_upper_bound=0.001)
   mol.residues = [setattrs(copy.copy(res), atoms=[]) for res in mol_pdb.residues]
@@ -112,7 +123,7 @@ def copy_residues(mol, mol_pdb):
 #  and remove these atoms when parsing is complete
 RES_RENAME = dict(CYX='CYS', HID='HIS', HIE='HIS')
 
-def parse_pdb(PDB, fix_tinker=True, bonds=True, alt_loc='A', bfactors=False):
+def parse_pdb(PDB, fix_tinker=True, bonds=False, alt_loc='A', bfactors=False):
   """ PDB data read from file or string (assumed if contains \n). Problems with Tinker generated PDB files
     fixed if `fix_tinker` is true.  Returns Molecule object or, if PDB data contains multiple models, list of
     Molecule objects
@@ -150,7 +161,7 @@ def parse_pdb(PDB, fix_tinker=True, bonds=True, alt_loc='A', bfactors=False):
       # Residue
       res_type = line[17:21].strip()
       res_type = RES_RENAME.get(res_type, res_type)
-      if not is_hetatm and res_type not in PDB_BONDS:
+      if not is_hetatm and res_type not in PDB_STANDARD:  #PDB_BONDS:
         print("Warning: unknown residue %s for ATOM %d" % (res_type, atom_num))
       elif is_hetatm and res_type in PDB_STANDARD:
         # prepend 'HET ' to standard residue listed as HETATMs, indicating it is not part of a polymer
