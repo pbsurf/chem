@@ -77,7 +77,7 @@
 
 import numpy as np
 from ..basics import *
-from ..molecule import mol_fragments, fragment_connections, generate_internals, nearest_pairs
+from ..analyze import mol_fragments, fragment_connections, generate_internals, nearest_pairs
 from .coords import XYZ
 
 class DLC:

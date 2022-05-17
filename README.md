@@ -7,12 +7,12 @@ Major features:
 - QM/MM driver supporting electrostatic embedding with various charge shifting schemes
 - DLC/HDLC/Redundant internal coordinates
 - transition state search (Dimer method, Lanczos method), reaction path optimization (NEB)
-- read/write .pdb, TINKER, GAMESS and NWChem files
+- read/write .pdb, .xyz (TINKER/generic), GAMESS and NWChem files
 - model creation and setup: build polypeptides, add hydrogens and bonds, mutate residues, solvate
+- free energy methods: FEP, BAR, umbrella sampling
 
 How to use this code:
-1. If an example in projects/ or test/ looks promising, try using that as a starting point ... all the examples are outdated or work-in-progress currently.  Open an issue describing what you're interested in doing and I'll help with getting started.
-- for example, see the "Preparation" section in projects/trypsin1.py; then from the folder containing 1MCT-trimI.pdb, at a Python prompt, run `execfile('<path to this repo>/projects/trypsin1.py')`
+1. If an example in projects/ or test/ looks promising, try using that as a starting point ... currently, most of the examples are outdated or work-in-progress.  Open an issue describing what you're interested in doing and I'll help with getting started.
 - add `import pdb; pdb.set_trace()` to step line by line
 - see "Examples" in test/vis_test.py for standalone visualization examples
 or
@@ -22,9 +22,12 @@ or
  - opt/neb.py: nudged elastic band (reaction path optimization)
  - opt/dimer.py: Dimer and Lanczos methods (transition state search)
  - qmmm/resp.py: RESP/CHELPG charge fitting (only harmonic restraints currently)
- - mm.py: slow but simple MM energy and gradient for AMBER-type force field (and Hessian for Coulomb and LJ)
- - fep.py: simple FEP, BAR free energy calculations
- - model/build.py: build polypeptides, add hydrogens and bonds, mutate residues
+ - mm.py: slow but simple MM energy and gradient for AMBER-type force field (and Hessian for Coulomb and LJ), GBSA implicit solvation energy
+ - molecule.py: atom selection, molecule alignment
+ - fep.py: simple FEP, BAR free energy calculations; MM-GBSA binding energy
+ - analyze.py: solvent accessible surface area, hydrogen bonding (DSSP), secondary structure
+ - model/build.py: build polypeptides, add hydrogens and bonds, mutate residues, set rotamers
+ - model/prepare.py: build solvent box, solvate, neutralize, check geometry
 
 Requirements:
 - Python 3 w/ scipy and numpy (should mostly still work with Python 2.7)
@@ -41,9 +44,6 @@ Optionally:
 - https://github.com/cclib/cclib - for reading GAMESS and NWChem output
 
 Credit to [chemlab](https://github.com/chemlab/chemlab/) (3D camera, some shaders) and [speck](https://github.com/wwwtyro/speck) (some shaders), among others.
-
-License:
-Any published results obtained using this software should be accompanied by all code needed to replicate.
 
 Screenshot: 1MCT.pdb shown with backbone ribbon, MM atoms as lines, QM atoms as sticks, and components of QM/MM force on each atom as yellow, cyan, magenta cylinders.
 

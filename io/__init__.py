@@ -9,7 +9,7 @@ from .xyz import parse_xyz, parse_mol2, write_xyz, write_tinker_xyz
 
 def load_molecule(file, postprocess=None, center=False, charges=False, residue=None, download=False, **kwargs):
   filename = None if '\n' in file else file
-  fileext = os.path.splitext(filename)[-1] if filename is not None else ''
+  fileext = os.path.splitext(filename)[-1][1:] if filename is not None else ''  # remove .
   if len(file) == 4 and not fileext:  # PDB ID
     filename = os.path.join(DATA_PATH, 'pdb/', file + '.pdb')
     if not os.path.exists(filename) and download:
@@ -87,6 +87,8 @@ def _load_zip_entry(zf, name, contents):
     return np.load(io.BytesIO(zf.read(name + '.npy')))
   if name + '.pkl' in contents:
     return pickle.loads(zf.read(name + '.pkl'))
+  if name + '.txt' in contents:
+    return zf.read(name + '.txt').decode('utf-8')
   if name + '.xyz' in contents:
     return load_molecule(zf.read(name + '.xyz').decode('utf-8'))
   if name + '.arc' in contents:
@@ -120,12 +122,14 @@ def _save_zip(filename, kwargs, mode):
     for k,v in kwargs.items():
       if type(v) is Molecule:
         zf.writestr(k + '.xyz', write_xyz(v))
-      elif safelen(v) > 0 and type(v[0]) is Molecule:
+      elif safelen(v) > 0 and all(type(m) is Molecule for m in v):
         # no blank lines in .arc; write_xyz includes trailing \n
         zf.writestr(k + '.arc', ''.join([write_xyz(m) for m in v]))
       elif type(v).__module__ == np.__name__:
         with zf.open(k + '.npy', 'w') as npyf:
           np.save(npyf, v)
+      elif type(v) is str:
+        zf.writestr(k + '.txt', v)
       else:  # np.save would either convert to numpy array or pickle anyway
         zf.writestr(k + '.pkl', pickle.dumps(v))
 

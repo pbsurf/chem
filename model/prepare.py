@@ -55,66 +55,74 @@ def protonation_check(mol, pH=7.4):
   return ok
 
 
-def geometry_check(mol, min_angle=np.pi/2):
+def geometry_check(mol, r=None, min_angle=np.pi/2):
   """ check molecule for unusual bonds or angles (by default < 90 deg - reasonable threshold for proteins) """
+  r = mol.r if r is None else r
   bonds, angles, diheds = mol.get_internals()
   badangles = [a for a in angles if mol.angle(a) < min_angle]
   for a in badangles:
     print("Warning: angle {} = {:.2f} degrees".format(a, 180*mol.angle(a)/np.pi))
-  ck = cKDTree(mol.r)
+  ck = cKDTree(r)
   tooclose = ck.query_pairs(0.75)
   for pair in tooclose:
-    print("Warning: distance {} = {:.3f} Ang".format(pair, mol.bond(pair)))
-  guessed_bonds = guess_bonds(mol.r, mol.znuc)
+    print("Warning: distance {} = {:.3f} \u212B".format(pair, mol.bond(pair)))
+  guessed_bonds = guess_bonds(r, mol.znuc)
   bonds_set, guessed_set = frozenset(bonds), frozenset(guessed_bonds)
   extra_bonds = bonds_set - guessed_set
   for extra_bond in extra_bonds:
     print("Warning: unexpected bond {}".format(extra_bond))
   missing_bonds = guessed_set - bonds_set
-  for missing_bond in missing_bonds:
-    print("Warning: possibly missing bond {}".format(missing_bond))
+  for b in missing_bonds:
+    print("Warning: possibly missing bond {} ({:.2f} \u212B)".format(b, mol.bond(b)))
   return list(set(tooclose) | extra_bonds | missing_bonds), badangles
+
+
+def antibunch(rcs, ncopies):  #pbcbox=None
+  """ return bool array w/ True for `ncopies` points in `rcs` most separated from neighbors """
+  # brute force pair distance calc runs out of memory for larger systems (but handles PBC, unlike kd-tree)
+  #pairs = np.triu_indices(len(rcs), 1)
+  #dr = np.abs((rcs[:,None,:] - rcs[None,:,:])[pairs])  # calc distance w/ PBCs
+  #dists = np.linalg.norm(np.min([dr, np.abs(dr - (extents[1] - extents[0]))], axis=0), axis=1)
+  #rmpairs = np.transpose(pairs)[np.argsort(dists)]
+  kd = cKDTree(rcs)
+  dists, locs = kd.query(rcs, k=[2,3,4,5])
+  #distance_upper_bound=2*(np.prod(extents[1,:] - extents[0,:])/ncopies)**(1/3))
+  pairs = np.reshape(np.dstack([locs.T, [range(len(rcs))]*locs.shape[1]]), (-1,2))
+  rmpairs = pairs[np.argsort(np.ravel(dists.T))]
+  nkeep = len(rcs)
+  keep = np.ones(nkeep, dtype=bool)
+  for a,b in rmpairs:
+    if keep[a] and keep[b]:
+      keep[a] = False
+      nkeep -= 1
+      if nkeep == ncopies:
+        break
+  return keep
 
 
 # Tinker's build solvent box function (xyzedit option 19) places molecules at random positions w/ random
 #  orientations; no effort to avoid clashes ... so we can just do it ourselves!
+# See tile_mol() in dlc_test.py for an alternative approach (place molecules on grid points, optionally with
+#  random offset and rotation)
 def solvent_box(mol, ncopies, extents, overfill=1.5):
   """ return Molecule with `ncopies` copies of `mol` in box specified by sides or bounds `extents`
     if `overfill` > 1, overfill*ncopies copies of mol are placed, then (overfill-1)*ncopies copies closest to
-    neighbors are removed
+    neighbors are removed; pass overfill < 0 to skip removal of extra copies
   """
   extents = np.asarray([extents]*3 if np.isscalar(extents) else extents)
   extents = np.array([-0.5*extents, 0.5*extents]) if np.size(extents) == 3 else extents
   r0 = mol.r - center_of_mass(mol)
   solvent = Molecule()
-  rcs = (extents[1] - extents[0])*np.random.rand(int(overfill*ncopies), 3) + extents[0]  # centers
+  rcs = (extents[1] - extents[0])*np.random.rand(int(abs(overfill)*ncopies), 3) + extents[0]  # centers
   if overfill > 1:
-    # brute force pair distance calc runs out of memory for larger systems
-    #pairs = np.triu_indices(len(rcs), 1)
-    #dr = np.abs((rcs[:,None,:] - rcs[None,:,:])[pairs])  # calc distance w/ PBCs
-    #dists = np.linalg.norm(np.min([dr, np.abs(dr - (extents[1] - extents[0]))], axis=0), axis=1)
-    #rmpairs = np.transpose(pairs)[np.argsort(dists)]
-    kd = cKDTree(rcs)
-    dists, locs = kd.query(rcs, k=[2,3,4,5])
-    #distance_upper_bound=2*(np.prod(extents[1,:] - extents[0,:])/ncopies)**(1/3))
-    pairs = np.reshape(np.dstack([locs.T, [range(len(rcs))]*locs.shape[1]]), (-1,2))
-    rmpairs = pairs[np.argsort(np.ravel(dists.T))]
-    nkeep = len(rcs)
-    keep = np.ones(nkeep, dtype=bool)
-    for a,b in rmpairs:
-      if keep[a] and keep[b]:
-        keep[a] = False
-        nkeep -= 1
-        if nkeep == ncopies:
-          break
-    rcs = rcs[keep]
+    rcs = rcs[ antibunch(rcs, ncopies) ]
   for rc in rcs:
     solvent.append_atoms(mol, r=np.dot(r0, random_rotation()) + rc)
 
   return solvent
 
 
-def water_box(sides, mmtypes=None):
+def water_box(sides, mmtypes=None, overfill=1.5):
   from .build import TIP3P_xyz
   from ..io import load_molecule
   tip3p = load_molecule(TIP3P_xyz, center=True, residue='HOH')
@@ -126,7 +134,7 @@ def water_box(sides, mmtypes=None):
   sides = np.array([sides]*3 if np.isscalar(sides) else sides)
   vol_cm3 = np.prod(sides)*1E-24  # 1 Ang^3 = 1E-24 cm^3
   nwaters = AVOGADRO*density*vol_cm3/molar_mass
-  solvent = solvent_box(tip3p, int(round(nwaters)), sides)  #overfill=3.0 might work better
+  solvent = solvent_box(tip3p, int(round(nwaters)), sides, overfill=overfill)  #overfill=3.0 might work better
   solvent.pbcbox = sides
   #~water_cube_side = 1E8*(molar_mass/(AVOGADRO*density))**(1/3.0)  # in Ang
   #~# Tinker periodic box seems to be centered at origin
@@ -138,9 +146,8 @@ def water_box(sides, mmtypes=None):
 
 # this basically what Tinker does (but just with nested loops instead of spatial index)
 # solvent molecules are assumed to be placed at random independent positions, so that we can just replace
-#  first N solvent molecules with ions to neutralize system (if ion_p and/or ion_n are provided)
-# - alternatively, we could just choose solvent molecules for replacement randomly
-def solvate(mol, solvent, r_solute=None, d=3.0, ion_p=None, ion_n=None, solute_res=None, solvent_chain=None):
+#  first N solvent molecules with ions to neutralize system;  d=2.0 might be more realistic
+def solvate(mol, solvent, r_solute=None, d=3.0, ions=[], solute_res=None, solvent_chain=None):
   """ combine molecules `mol` and `solvent`, removing any residues in `solvent` within `d` Ang of `mol` """
   if r_solute is None: r_solute = mol.r
   kd = cKDTree(r_solute)
@@ -150,18 +157,13 @@ def solvate(mol, solvent, r_solute=None, d=3.0, ion_p=None, ion_n=None, solute_r
 
   solvated = Molecule(pbcbox=solvent.pbcbox)  #, header=mol.header + " in " + solvent.header)
   solvated.append_atoms(mol, r=r_solute, residue=solute_res)
-  if ion_p or ion_n:
-    # solvent assumed to be neutral for now
-    net_charge = round(np.sum(mol.mmq))  # + np.sum(solvent.mmq)
-    ion = ion_n if net_charge > 0.0 else ion_p
+  # replace first N solvent molecules w/ ions
+  for ion in ions:
     for ii,res in enumerate(solvent.residues):
-      if abs(net_charge) <= 0.5*abs(ion.mmq):
-        break
       if ii not in remove:
-        r_ii = np.mean([solvent.atoms[jj].r for jj in res.atoms], axis=0)
+        solvated.append_atoms(ion, r=ion.r + np.mean([solvent.atoms[jj].r for jj in res.atoms], axis=0))
         remove.add(ii)
-        solvated.append_atoms(ion, r=ion.r + r_ii)
-        net_charge += ion.mmq
+        break  # inner loop
 
   retain = [ii for ii in range(len(solvent.residues)) if ii not in remove]
   solvent = solvent.extract_atoms(resnums=retain)

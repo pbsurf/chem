@@ -162,6 +162,7 @@ def chelpg_grid(r, znuc, density=5.0, random=False, minr=1.0, maxr=2.0):
 
 
 ## Not sure this is worth keeping when we have cubic grid and random options already
+# ... replace with (or combine with?) shell_grid()?
 # Merz-(Singh-)Kollman grid scheme: nested shells of grid points 1.4,1.6,1.8,2.0 times approx vdW radius (1.2
 #  for H, 1.4 for O, 1.5 for C, N) from nearest atom
 # Gaussian seems to default to 0.25 Ang separation between points in a given shell, but shells might be closer

@@ -223,6 +223,12 @@ def dE_theos(molAI, nearres, candidates, ff, mAI, theos, host, lig):
 # - for subsequent residues, choose parent, weighted by choices of nearby residues
 # - choose a different candidate (not from either parent) w/ some probability (based on amino acid similarity and deAI)
 
+# Genetic algo refs:
+# - https://www.mathworks.com/help/gads/genetic-algorithm.html?s_tid=CRUX_lftnav
+# - https://towardsdatascience.com/genetic-algorithm-implementation-in-python-5ab67bb124a6
+# - https://machinelearningmastery.com/simple-genetic-algorithm-from-scratch-in-python/
+# - https://new.rosettacommons.org/docs/latest/application_documentation/design/mpi-msd
+
 from chem.data.pdb_bonds import GRANTHAM_DIST
 pnomr
 
@@ -658,7 +664,7 @@ if 0:
 if 0:
   for ii,mol in enumerate(mutAI):
     if dE_AI[ii] > 0: continue
-    comp = {}
+    comp = Bunch()
     openmm_load_params(mol, ff=ff, charges=True, vdw=True, bonded=False)
     Encmm, Gncmm = NCMM(mol, qqkscale=OPENMM_qqkscale)(mol, components=comp)
     selI = mol.select('/I//')

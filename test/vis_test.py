@@ -123,20 +123,20 @@ if 0:
     bg_color=Color.black).run()
 
   # ball and stick
-  vis = Chemvis(Mol(Files(DATA_PATH + '/pdb/1CE5.pdb', hydrogens=True), [VisGeom(style='licorice', sel='protein', stick_radius=0.35, coloring='carbonchain') ]), fog=True).run()
+  vis = Chemvis(Mol(Files('1CE5', hydrogens=True), [VisGeom(style='licorice', sel='protein', stick_radius=0.35, coloring='carbonchain') ]), fog=True).run()
 
   # ball and stick, solid color sticks, no shading
-  vis = Chemvis(Mol(Files('1CE5.pdb', hydrogens=True), [VisGeom(style='ballstick', sel='protein', coloring='carbonchain') ]), shading=LightingShaderModule(shading='none', outline_strength=8.0), bg_color=Color.white).run()
+  vis = Chemvis(Mol(Files('1CE5', hydrogens=True), [VisGeom(style='ballstick', sel='protein', coloring='carbonchain') ]), shading=LightingShaderModule(shading='none', outline_strength=8.0), bg_color=Color.white).run()
 
   # cartoon shading/"molecule-of-the-month" - e.g. https://pdb101.rcsb.org/motm/213 (typically no hydrogens)
-  vis = Chemvis(Mol(Files('1CE5.pdb'), [VisGeom(style='spacefill', sel='protein and znuc > 1', coloring='motm') ]), shading=LightingShaderModule(shading='none', outline_strength=4.0), effects=[AOEffect(nsamples=70)], bg_color=Color.white).run()
+  vis = Chemvis(Mol(Files('1CE5'), [VisGeom(style='spacefill', sel='protein and znuc > 1', coloring='motm') ]), shading=LightingShaderModule(shading='none', outline_strength=4.0), effects=[AOEffect(nsamples=70)], bg_color=Color.white).run()
 
   # ambient occlusion
   Chemvis(Mol(Files('1CE5.pdb', hydrogens=True), [ VisGeom(style='spacefill') ]),
     effects=[AOEffect(nsamples=70)], shadows=True).run()
 
   # Cutinase - esterase w/ classic SER, HIS, ASP catalytic triad
-  vis = Chemvis(Mol(Files('1CEX.pdb', hydrogens=True), [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, colors=None, color_interp='ramp'), VisGeom(style='lines', sel='extbackbone'), VisGeom(style='lines', sel='sidechain') ]), fog=True).run()
+  vis = Chemvis(Mol(Files('1CEX', hydrogens=True), [ VisBackbone(style='tubemesh', disulfides='line', coloring=color_by_resnum, colors=None, color_interp='ramp'), VisGeom(style='lines', sel='extbackbone'), VisGeom(style='lines', sel='sidechain') ]), fog=True).run()
   vis.select("/A/120,175,188/~C,N,CA,O,H,HA")  # catalytic triad sidechains
 
   # pseudo-cartoon

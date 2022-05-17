@@ -59,7 +59,7 @@ def parse_xyz(xyz, inorganic=False):
       r=np.array(l[2:5], 'd'),
       znuc=ELEMENTS[elem].number if elem in ELEMENTS else 0,
       mmtype=(int(l[5]) if l[5].isdigit() else l[5]) if len(l) > 5 else 0,
-      mmq=float(l[6]) if has_mmq else 0.0,
+      mmq=float(l[6]) if has_mmq else None,
       # note conversion to zero-based indexing
       mmconnect=[int(x) - offset for x in l[(7 if has_mmq else 6):]],
       resnum=len(mol.residues) - 1 if mol.residues else None
@@ -76,7 +76,7 @@ def parse_xyz(xyz, inorganic=False):
 
 
 def parse_mol2(xyz, inorganic=False):
-  """ parse mol2 format (used by Amber) - similar to xyz by different enough to justify separate fn """
+  """ parse mol2 format (used by Amber) - similar to xyz but different enough to justify separate fn """
   fxyz = xyz if type(xyz) is not str else StringIO(xyz) if '\n' in xyz else open(xyz, 'r')
   skiptoline(fxyz, "@<TRIPOS>ATOM", strip=True)
   mol = Molecule()
@@ -90,6 +90,7 @@ def parse_mol2(xyz, inorganic=False):
       if res_id != last_res_id:
         res_type = l[7] if len(l) > 7 else 'UNK'
         mol.residues.append(Residue(name=res_type, pdb_num=res_id, chain='Z', het=True))
+      mol.residues[-1].atoms.append(len(mol.atoms))
 
     mol.atoms.append(Atom(
       name=l[1],

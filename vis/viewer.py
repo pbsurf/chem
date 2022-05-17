@@ -16,6 +16,10 @@ from .glutils import *
 #  doBufferDeletion() at arrays/vbo.py:107 set by arrays/vbo.py:286 (for some reason this doesn't happen when
 #  threading=False); soln for now is to use user_finish callback to clear children in chemvis for GC
 
+# intermittent crash on subsequent calls to glfwCreateWindow: crash is in glfwCreateWindow ->
+#   glfwRefreshContextAttribs -(first call)-> glfwMakeContextCurrent -> previous.context.makeCurrent attempt
+# to print python traceback on segfault:  import faulthandler; faulthandler.enable()
+
 class GLFWViewer:
   inited = False
   # try to reuse window, since deleting and recreating randomly crashes in glfwCreateWindow ->

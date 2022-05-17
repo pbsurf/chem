@@ -8,7 +8,7 @@ from chem.fep import *
 from chem.vis.chemvis import *
 
 
-def openmm_fep(mol, ligatoms, ff, T0, state=None, mdsteps=25000, sampsteps=100,
+def openmm_fep(mol, lig, ff, T0, state=None, mdsteps=25000, sampsteps=100,
     useMC=False, warmup=5, ele_steps=5, vdw_steps=5, rst_steps=0, restraint=None, dt=4.0, verbose=False):
   """ compute free energy difference for turing off non-bonded interactions between `ligatoms` and rest of
     `mol` at temperature `T0` with openmm force field `ff` using `ele_steps` "lambda" steps to turn off
@@ -20,8 +20,8 @@ def openmm_fep(mol, ligatoms, ff, T0, state=None, mdsteps=25000, sampsteps=100,
   from openmmtools.integrators import HMCIntegrator, VelocityVerletIntegrator
   from pymbar import MBAR, BAR
 
-  top = openmm_top(mol)
-  basesystem = ff.createSystem(top, nonbondedMethod=openmm_app.PME,
+  ligatoms = mol.select(lig)
+  basesystem = ff.createSystem(openmm_top(mol), nonbondedMethod=openmm_app.PME,
       nonbondedCutoff=min(0.5*min(mol.pbcbox), 10)*UNIT.angstrom, constraints=openmm_app.HBonds)
   alchregion = alchemy.AlchemicalRegion(alchemical_atoms=ligatoms)
   alchfactory = alchemy.AbsoluteAlchemicalFactory()

@@ -184,6 +184,33 @@ def test_rigid_rot(scale=0.1, offset=0.0, angle=None, dir=None):
   print("rot, q1-q0, dq:", dir*np.sin(angle), np.array(q1) - np.array(q0), np.array(dq))
 
 
+# How might we support final box extents + total number of copies?
+# - this related to sphere packing, which is non-trivial
+# - maybe see https://stackoverflow.com/questions/9600801/evenly-distributing-n-points-on-a-sphere
+# - we could try low-discrepancy sequence to generate points, but still some probability of clash, and
+#  a single clash can break minimization
+# - consider removing shuffling or making it optional
+def tile_mol(mol, extents, shape, rand_rot=False, rand_offset=0):
+  """ tile `mol` with box `extents` symmetrically about its center `shape` times (x,y,z), optionally with
+    random rotation if `rand_rot`=True and random translation by 0 to +/-0.5 * `random_offset`
+  """
+  extents = np.asarray([extents]*3 if np.isscalar(extents) else extents)
+  extents = np.array([-0.5*extents, 0.5*extents]) if np.size(extents) == 3 else extents
+  unitcell = extents[1] - extents[0]
+  offset = 0.5*(np.array(shape)-1)
+  r0 = mol.r
+  tiled = Molecule()
+  ijks = [(ii, jj, kk) for ii in range(shape[0]) for jj in range(shape[1]) for kk in range(shape[2])]
+  np.random.shuffle(ijks)
+  # I think this could be vectorized
+  for ijk in ijks:
+    r = np.dot(r0, random_rotation()) if rand_rot else r0
+    r = r + (ijk - offset) * unitcell
+    r = r + rand_offset*(np.random.random(3) - 0.5) if rand_offset else r
+    tiled.append_atoms(mol, r)
+  return tiled
+
+
 # mol = load_molecule(ethanol)
 # dlc = DLC(mol, coord_fns=[centroid, MeanRotVector]).init()
 # hdlc = HDLC(mol, autodlc=1, dlcoptions=dict(coord_fns=[centroid, MeanRotVector], autoxyzs='none', recalc=0)).init()

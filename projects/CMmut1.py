@@ -1,117 +1,11 @@
-import random
 from chem.io import *
-from chem.io.openmm import *
-from chem.model.build import *
-from chem.model.prepare import *
-from chem.opt.optimize import *
-from chem.opt.dlc import HDLC, DLC
-from chem.fep import *
-from chem.mm import *
+from chem.mmtheo import *
 from chem.vis.chemvis import *
-from chem.data.pdb_data import AA_3TO1, PDB_EXTBACKBONE
-
-
-# calculate per-residue energy - in vacuum, not solvent!
-# ... not sure this is really useful - doesn't seem particularly correlated w/ binding energy
-
-def get_coulomb_terms(rq1, mq1, rq2, mq2, kscale):
-  dr = rq1[:,None,:] - rq2[None,:,:]
-  dd = np.sqrt(np.sum(dr*dr, axis=2))
-  #np.fill_diagonal(dd, np.inf)
-  return kscale*ANGSTROM_PER_BOHR*(mq1[:,None]*mq2[None,:])/dd
-
-
-def sidechain_Eqq(mol, nearres, lig):
-  """ return electrostatic energy between atoms `lig` and sidechains of each residue `nearres` """
-  ligatoms = [mol.atoms[ii] for ii in mol.select(lig)]
-  rq1, mq1 = np.array([a.r for a in ligatoms]), np.array([a.mmq for a in ligatoms])
-  Eres = []
-  for resnum in nearres:
-    atoms = [mol.atoms[ii] for ii in mol.residues[resnum].atoms if mol.atoms[ii].name not in PDB_EXTBACKBONE]
-    rq2, mq2 = np.array([a.r for a in atoms]), np.array([a.mmq for a in atoms])
-    Eqq = get_coulomb_terms(rq1, mq1, rq2, mq2, OPENMM_qqkscale)
-    Eres.append(np.sum(Eqq))
-  return np.asarray(Eres)
-
-
-def relax_bind(mol, E0, ff, host='protein', lig='not protein', active=None, optargs=dict(verbose=-100)):
-  optargs = dict(dict(gtol=0.04, maxiter=50, raiseonfail=False, verbose=-2), **optargs)
-  r0 = mol.r
-  active = mol.select(active) if active is not None else None
-  waters = [Rigid(r0, res.atoms, pivot=None) for res in mol.residues if res.name == 'HOH']
-  coords = HDLC(mol, [XYZ(r0, active=active, atoms=mol.select('not water'))] + waters) \
-      if waters else XYZ(r0, active=active)
-  res, r = moloptim(OpenMM_EandG(mol, ff), r0, coords=coords, **optargs)
-  return (np.inf if res.fun > E0 + 0.5 else dE_binding(mol, ff, host, lig, r)), r
-
-
-# perform mutations, replacing worst candidate in population if result is better
-# - this makes it possible to accept some mutations that are worse than original, at a cost of loss of diversity
-# ... therefore we assume dE_search will be run multiple times for better diversity
-
-def dE_search2(molAI, molAZ, bindAI, bindAZ, nearres, candidates, mutweight, Npop=20, maxiter=200):
-  molAIhist, molAZhist, dEhist = [None]*Npop, [None]*Npop, [np.inf]*Npop
-  dEmaxidx = 0
-  # favor candidates with more rotamers
-  candweights = l1normalize([np.ceil(np.sqrt(len(get_rotamers(c)) or 4)) for c in candidates])
-  try:
-    for ii in range(maxiter):
-      if dEhist[dEmaxidx] == np.inf:
-        mutAI, mutAZ = Molecule(molAI), (Molecule(molAZ) if molAZ is not None else None)
-        mutres = nearres
-      else:
-        mutAI, mutAZ = Molecule(molAIhist[ii%Npop]), (Molecule(molAZhist[ii%Npop]) if molAZ is not None else None)
-        mutres = random.choices(nearres, weights=mutweight(mutAI))
-
-      # mutation
-      for resnum in mutres:
-        newres = random.choices(candidates, weights=candweights)[0]
-        mutate_residue(mutAI, resnum, newres)
-        rotamers = get_rotamers('HIE' if newres == 'HIS' else newres)  # fix this
-        if not rotamers:
-          deAI, r1 = bindAI(mutAI)
-        else:
-          for rotidx in np.random.permutation(len(rotamers))[:10]:
-            angles = random.choice(rotamers)  #360*np.random(len(get_rotamer_angles())
-            set_rotamer(mutAI, resnum, angles)
-            deAI, r1 = bindAI(mutAI)
-            if deAI < 0: break
-        if deAI >= 0:  # this residue won't work, abort
-          break
-        mutAI.r = r1
-
-      if deAI >= 0:  # mutations didn't work, try another candidate
-        continue
-      if mutAZ is not None:
-        for resnum in mutres:
-          mutate_residue(mutAZ, resnum, mutAI.extract_atoms(residues=resnum))
-        deAZ, mutAZ.r = bindAZ(mutAZ)
-      else:
-        deAZ = 0
-
-      dE = deAI - deAZ
-      accept = deAI < 0 and deAZ <= 0 and dE <= dEhist[dEmaxidx]
-      print("%03d: %s: %f - %f = %f%s" % (ii, ''.join(AA_3TO1[mutAI.residues[rn].name] for rn in nearres),
-          deAI, deAZ, dE, ' (accept)' if accept else ''))
-      if accept:
-        dEhist[dEmaxidx] = dE
-        molAIhist[dEmaxidx] = mutAI
-        molAZhist[dEmaxidx] = mutAZ
-        dEmaxidx = max(range(Npop), key=lambda kk: dEhist[kk])
-  except KeyboardInterrupt as e:  #(, Exception) as e:
-    pass
-
-  ord = argsort(dEhist)
-  return Bunch(molAI=[molAIhist[ii] for ii in ord], molAZ=[molAZhist[ii] for ii in ord], dE=[dEhist[ii] for ii in ord])
 
 
 ## ---
 
 T0 = 300  # Kelvin
-
-# print python traceback on segfault
-# crash is in glfwCreateWindow -> glfwRefreshContextAttribs -(first call)-> glfwMakeContextCurrent -> previous.context.makeCurrent attempt
-#import faulthandler; faulthandler.enable()
 
 # aside: vary width of lines based on depth (or use thin licorice w/ lighting?); play with FOV(?) to increase perspective (Ctrl+D to increase FOV + E to decrease licorice radius) ... definitely worth seeing if we can get a better default or least a useful preset
 
@@ -140,7 +34,10 @@ if not os.path.exists("PRE.mol2"):
 ff = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml', 'ISJ.ff.xml', 'PRE.ff.xml', nonbondedMethod=openmm.app.PME)
 ffgbsa = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml', 'implicit/obc1.xml', 'ISJ.ff.xml', 'PRE.ff.xml', nonbondedMethod=openmm.app.CutoffNonPeriodic)
 
-host, ligin, ligout = '/A,B,C//', '/I//', '/O//'
+ffp = OpenMM_ForceField(ff.ff, ignoreExternalBonds=True)
+ffpgbsa = OpenMM_ForceField(ffgbsa.ff, ignoreExternalBonds=True)  #removeCMMotion=False
+
+host, ligin, ligout, ligall = '/A,B,C//', '/I//', '/O//', '/I,O//'
 
 if os.path.exists("CMwt.zip"):
   molwt_AI, molwt_AO = load_zip("CMwt.zip", 'molwt_AI', 'molwt_AO')
@@ -223,100 +120,283 @@ else:
 #  save_zip('mutate2a.zip', de1AI=de1AI, m1AI=np.ravel(m1AI))
 
 
-ffp = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml', 'ISJ.ff.xml', 'PRE.ff.xml', ignoreExternalBonds=True)
-ffpgbsa = OpenMM_ForceField('amber99sb.xml', 'tip3p.xml', 'implicit/obc1.xml', 'ISJ.ff.xml', 'PRE.ff.xml', ignoreExternalBonds=True)
-#removeCMMotion=False
+## create system of just residues w/in small radius (~7 Ang) of lig for faster MM calc
+# - this looked slighly better than using residues w/in 2.8 Ang of nearres4 sidechains, since that got a bunch
+#  of sidechains pointing away from lig - not helpful in constraining nearres
+ligreswt = molwt_AI.atomsres(ligin)[0]
+nearres7 = molwt_AI.atomsres(molwt_AI.get_nearby(ligin, 7.0, active='protein'))
+nearres4 = molwt_AI.atomsres(molwt_AI.get_nearby(ligin, 4.0, active='sidechain'))  # 4 Ang
+molpwt_AI = molwt_AI.extract_atoms(resnums=nearres7 + [ligreswt])
+nearres = molpwt_AI.atomsres(molpwt_AI.get_nearby(ligin, 4.0, active='sidechain'))  # 4 Ang
+
+ligatoms = molpwt_AI.select(ligin)
+ligres = molpwt_AI.atomsres(ligatoms)[0]
+freeze = 'protein and (extbackbone or resnum not in %r)' % nearres
+
+# vector from COM of host to COM of lig (to approximate normal vector of binding site)
+bindvec = center_of_mass(molwt_AI, molwt_AI.select(ligin)) - center_of_mass(molwt_AI, molwt_AI.select(host))
+# center to use of PBC w/ partial molecule system
+pcenter = np.mean(molpwt_AI.extents(), axis=0) + 5.0*normalize(bindvec)
 
 
-## create system of just residues w/in small radius (~8 Ang) of lig for faster MM calc
-ligres = mol0_AI.atomsres(ligin)[0]
-#nearres8 = sorted(find_nearres(mol0_AI, '/A,B,C/*/~C,N,CA,O,H,HA', ligin, 8.0))
-nearres8 = mol0_AI.atomsres(mol0_AI.get_nearby(ligin, 8.0, active='/A,B,C/*/~C,N,CA,O,H,HA'))
-nearres, nearres_full = [ii for ii,rn in enumerate(nearres8) if rn in nearres], nearres
+## dE_search2
 
+def mutate_weights(mol, ff, nearres, lig):
+  # get electrostatic energy in Hartree between each nearres sidechain and lig
+  if not hasattr(mol, 'sc_Eqq'):
+    openmm_load_params(mol, ff=ff)
+    mol.sc_Eqq = sidechain_Eqq(mol, nearres, lig)
+    #print("sidechain_Eqq: ", mol.sc_Eqq)
+  # prefer residues w/ poor Eres for mutation
+  return l1normalize((mol.sc_Eqq > -0.1) + 0.5)
+
+# vis = Chemvis(Mol(mol, [VisGeom(style='lines', sel='water'), VisGeom(sel='protein'), VisGeom(style='spacefill', sel=ligall)]), fog=True).run()
+
+# openmm amber99sb doesn't include C or N terminal ASH, GLH
+candidates = ['GLY', 'SER', 'THR', 'LEU', 'ASN', 'ASP', 'CYS', 'MET', 'GLN', 'GLU', 'LYS', 'HIE', 'ARG']
 
 # start interactive
 import pdb; pdb.set_trace()
 
-# Try dE_search2, w/ an eye toward where metadynamics might be useful
-# - very low probability of random set of residues fitting ... identify problematic residues and try different rotatmer?
-#  - add the residues one at a time? try different rotamers upon failure? - this might be better since multiple residues could be issue
-# - start w/ smaller residues?
-
-
-molp_AI = mol0_AI.extract_atoms(resnums=nearres8 + [ligres])
-molp_AZ = None
-
-nearres4 = molp_AI.atomsres(molp_AI.get_nearby(ligin, 4.0, active='/A,B,C/*/~C,N,CA,O,H,HA'))
-ligatoms = molp_AI.select(ligin)
-freeze = molp_AI.select('protein and (extbackbone or resnum not in %r)' % nearres4)
-
-def mutate_weights(mol):
-  # get electrostatic energy in Hartree between each nearres sidechain and lig
-  if not hasattr(mol, 'sc_Eqq'):
-    openmm_load_params(mol, ff=ffpgbsa)
-    mol.sc_Eqq = sidechain_Eqq(mol, nearres, ligin)
-    print("sidechain_Eqq: ", mol.sc_Eqq)
-  # prefer residues w/ poor Eres for mutation
-  return l1normalize((mol.sc_Eqq > -0.1) + 0.5)
-
-
-if os.path.exists('search1.zip'):
-  res = load_zip('search1.zip')
+# previous runs:
+# - search1.zip: smaller limited set of nearres (see above)
+# - search2.zip: partial structure, relaxed w/o freezing backbone
+if os.path.exists('search3.zip'):
+  theos = load_zip('search3.zip')
 else:
-  Ep_AI, _ = openmm_EandG(molp_AI, ff=ffpgbsa, grad=False)
+  mol0_AI = prep_mutate(molwt_AI, nearres4, 'ALA')
+  res0, mol0_AI.r = moloptim(OpenMM_EandG(mol0_AI, ffgbsa), mol0_AI, maxiter=200)
+  E0_AI = res0.fun
+  #mol0_AI, E0_AI = mutate_relax(molwt_AI, nearres4, 'ALA', ff=ffgbsa, optargs=dict(maxiter=200, verbose=-1))
   #Ep_AZ, _ = openmm_EandG(molp_AZ, ff=ffpart, grad=False)
-  #active = '(not protein and not water) or (resnum in %r and not extbackbone)' % nearres
-  active = '(resnum in %r and not extbackbone) or not protein' % nearres4
-  bindAI = partial(relax_bind, E0=Ep_AI, ff=ffpgbsa, active=active)
-  bindAZ = None  #partial(relax_bind, E0=Ep_AZ, ff=ffpgbsa, active=active)
-  res = dE_search2(molp_AI, molp_AZ, bindAI, bindAZ, nearres, candidates, mutate_weights)
-  save_zip('search1.zip', **res)  # save results
+  #active = '(resnum in %r and not extbackbone) or not protein' % nearres4
+  bindAI = partial(relax_bind, E0=E0_AI, ff=ffgbsa)  #, mmargs=dict(nonbondedMethod=openmm.app.CutoffNonPeriodic))
+  weightfn = partial(mutate_weights, ff=ffgbsa, nearres=nearres4, lig=ligin)
+  mol0_AZ, bindAZ = None, None  #partial(relax_bind, E0=Ep_AZ, ff=ffpgbsa, active=active)
+  theos = dE_search2(mol0_AI, mol0_AZ, bindAI, bindAZ, nearres4, candidates, weightfn)
+  save_zip('search3.zip', **theos)  # save results
+
+
+# common params
+ntheos = len(theos.dE)
+# use same PBC box dimensions for each system
+molp0 = theos.molAI[0].extract_atoms(resnums=nearres7 + [ligreswt])
+pbcside = np.max(np.diff(molp0.extents(pad=6.0), axis=0))
+
+
+## ligand unbinding - (steered) MD
+if os.path.exists('search3_smd.zip'):
+  smd = load_zip('search3_smd.zip')
+else:
+  smd = Bunch(mols=[None]*ntheos, Rs=[None]*ntheos, Vs=[None]*ntheos, Wneq=[None]*ntheos)
+  for ii,mol0 in enumerate(theos.molAI[:1]):  #molAImd; mol.md_vel = theos.molAImd_vel[ii]
+    molp0 = mol0.extract_atoms(resnums=nearres7 + [ligreswt])
+    mol = prep_solvate(molp0, ffp, pad=6.0, center=pcenter, solvent_chain='Z', neutral=True)
+    mol = prep_relax(mol, ffp, T0, freeze=freeze, eqsteps=5000)
+    Rs, Es, Vs, Wneq = expel_md(mol, ffp, T0, ligin, bindvec, freeze, dist=12.0, nsteps=20000)
+    smd.mols[ii], smd.Rs[ii], smd.Vs[ii], smd.Wneq[ii] = mol, Rs, Vs, np.cumsum(Wneq)
+    #np.sum(Wneq)*KCALMOL_PER_HARTREE  # 104, 88, 68, 69.9
+    #plot(np.cumsum(Wneq)*KCALMOL_PER_HARTREE)
+
+  save_zip('search3_smd.zip', **smd)  # save results
+
+
+## umbrella sampling - initialized with trajectory from MD ligand unbinding
+mol = smd.mols[0]
+cvforce, cvval = com_restraint(mol, ligin, bindvec, kspring=2000)
+steps = np.linspace(4.0, 4.0+12.0, 13)
+umbres = umbrella(mol, ffp, T0, smd.Rs[0], smd.Vs[0], cvforce, cvval, steps=steps, freeze=freeze, mdsteps=10000)
+
+# search3_umb.zip: kspring=1.6E4
+save_zip('search3_umb2.zip', **umbres)
+
+nbins = 24
+bins = np.linspace(np.min(umbres.cv), np.max(umbres.cv), nbins+1)[1:]
+#bin_n = np.digitize(umbres.cv, bins); [np.sum(bin_n == i) for i in range(nbins)]
+
+mbar = pymbar.MBAR(umbres.E_kln, [len(E[0]) for E in umbres.E_kln])  #, verbose=1)
+pmfres = mbar.computePMF(umbres.E0_kn, np.digitize(umbres.cv, bins), nbins, return_dict=True)
+
+# check for overlap between steps
+histbins = np.linspace(np.min(umbres.cv), np.max(umbres.cv), 100)
+histo = [np.histogram(cvs, histbins)[0] for cvs in umbres.cv]
+plot(histbins[:-1], np.transpose(histo))
+
+# try FEP for analysis
+fep_results_full(umbres.E_kln, T0, warmup=0)
+
+
+## FEP calculation - turn off interactions between lig and rest of system
+theos.E_kln = [None]*len(theos.dE)
+for ii,mol0 in enumerate(theos.molAI[:2]):  #molAImd; mol.md_vel = theos.molAImd_vel[ii]
+  molp0 = mol0.extract_atoms(resnums=nearres7 + [ligreswt])
+  # lig charge is -2, so we need at least 2 positive ions to decouple along with it
+  mol = prep_solvate(molp0, ffp, center=pcenter, side=pbcside, solvent_chain='Z', neutral=2)
+  mol = prep_relax(mol, ffp, T0, freeze=freeze, eqsteps=5000)
+  ligatoms = mol.select(ligin) + mol.select("name == 'Na+'")[:2]
+  # we won't bother w/ restraint for now (w/ short MD runs) - see trypsin2.py for example
+  theos.fepres[ii] = fep_decouple(mol, ffp, T0, ligatoms, freeze=freeze, mdsteps=20000)
+  fep_results_full(theos.fepres[ii].E_kln, T0)
+
+# search3_fep1.zip - forgot to include counterions (since lig is charged)
+save_zip('search3_fep2.zip', **theos)
+
+# FEP with just lig and solvent - only need to run this once of course
+molp0 = mol0.extract_atoms(resnums=[ligreswt])
+mol = prep_solvate(molp0, ffp, side=pbcside, solvent_chain='Z', neutral=True)  #center=pcenter,
+mol = prep_relax(mol, ffp, T0, freeze=freeze, eqsteps=5000)
+
+# check for complete decoupling
+feptest = fep_decouple(mol, ffp, T0, ligin, freeze=freeze, mdsteps=20000, state=Bunch(Rs=True, idx_lambda=10))
+
+theos.fepres_hoh = fep_decouple(mol, ffp, T0, ligin, freeze=freeze, mdsteps=20000)
+fep_results_full(theos.fepres_hoh.E_kln, T0)
+
+
+## replace ISJ w/ PRE
+# - how to implement a threshold for min value of dE for PRE?
+mPRE = molwt_AO.extract_atoms(ligout)
+theos.dE_AO, theos.Rs_AO = [], []
+for ii,mol0 in enumerate(theos.molAI):
+  mol = mol0.extract_atoms(host)
+  mol.append_atoms(mPRE)
+  Ep_AO = 0  #, _ = openmm_EandG(molp_AI, ff=ffpgbsa, grad=False)
+  dE, r1 = relax_bind(mol, Ep_AO, ffgbsa, active=active, optargs=dict(gtol=0.004, maxiter=200, verbose=-2))
+  print("dE I - O: %f - %f = %f" % (theos.dE[ii], dE, theos.dE[ii] - dE))
+  theos.dE_AO.append(dE)
+  theos.Rs_AO.append(r1)
+
+save_zip('search3_io.zip', **theos)  # save results
+
+
+## MD - for now we will only run on a subset of candidate systems
+# TODO: consider adding support to save_zip()/load_zip() for saving mol.md_vel to .md_vel.npy
+theos.dEmd = [None]*len(theos.dE)
+theos.molAImd = [None]*len(theos.dE)
+theos.molAImd_vel = [None]*len(theos.dE)
+for ii,mol0 in enumerate(theos.molAI[:4]):
+  molp0 = mol0.extract_atoms(resnums=nearres7 + [ligreswt])
+  mol = prep_solvate(molp0, ffp, pad=6.0, center=pcenter, solvent_chain='Z', neutral=True)
+  mol = prep_relax(mol, ffp, T0, freeze=freeze, eqsteps=5000)
+  ctx = openmm_MD_context(mol, ffp, T0, v0=mol.md_vel, freeze=freeze)
+  Rs, Es = openmm_dynamic(ctx, 10000, 100)
+  dEs = dE_binding(mol, ffpgbsa, host, ligin, Rs)
+  theos.dEmd[ii] = dEs
+  # save state after MD prep for future MD runs
+  theos.molAImd[ii] = mol
+  theos.molAImd_vel[ii] = mol.md_vel  # because save_zip will not include this when saving mol
+  print("%d dE opt: %f; MD: %f +/- %f" % (ii, theos.dE[ii], np.mean(dEs), np.std(dEs)))
+
+save_zip('search3_md.zip', **theos)  # save results
+
+
+## MD for water binding
+theos.dEhoh = [None]*len(theos.dE)
+for ii,mol0 in enumerate(theos.molAI[:4]):
+  molp0 = mol0.extract_atoms(resnums=nearres7)
+  rlig = mol0.r[mol0.select("chain == 'I' and znuc > 1")] - molp0.r[0]
+  mol = prep_solvate(molp0, ffp, pad=6.0, center=pcenter, solvent_chain='Z', neutral=True)
+  rlig = rlig + mol.r[0]
+  mol = prep_relax(mol, ffp, T0, freeze=freeze, eqsteps=5000)
+  ctx = openmm_MD_context(mol, ffp, T0, v0=mol.md_vel, freeze=freeze)
+  Rs, Es = openmm_dynamic(ctx, 10000, 100)
+  dEs = dE_binding_hoh(mol, ffpgbsa, Rs, rlig)
+  theos.dEhoh[ii] = dEs
+  print("%d dE lig: %f; water: %f +/- %f" % (ii, theos.dE[ii], np.mean(dEs), np.std(dEs)))
+
+
+## ligand unbinding - MM
+theos.Es_mm = [None]*len(theos.dE)
+for ii,mol0 in enumerate(theos.molAI[:4]):
+  mol = mol0.extract_atoms(resnums=nearres7 + [ligreswt])
+  Rs, Es = expel_mm(mol, ffpgbsa, ligin, bindvec, freeze, dist=12.0, nsteps=13)
+  theos.Es_mm[ii] = Es
+
+
+
+
+## clustering and comparing results from dE_search2
+# ... try ansi_color() from seq_align.py?
+from scipy.spatial.distance import squareform
+from scipy.cluster.hierarchy import linkage, fcluster
+
+seqs1 = [[(AA_3TO1[mol.residues[rn].name]) for rn in nearres4] for mol in theos.molAI]
+seqs2 = [[(AA_3TO1[mol.residues[rn].name]) for rn in nearres4] for mol in theos2.molAI]
+
+seqs = np.array(seqs1 + seqs2)
+Ds = np.array([[np.sum(seq1 != seq2) for seq1 in seqs] for seq2 in seqs])
+
+Z = linkage(squareform(Ds), method='single')
+clust = fcluster(Z, len(seqs[0])/3, criterion='distance')  # also possible to specify number of clusters instead
+
 
 
 ## NEXT:
-# - MD calc for dE_search2 results - w/ lig and w/ waters
-#  - binding energy for waters
-#  - then try computing binding energy by pulling lig out of host
+# - run dE_search2 a few more times ... different result, similar binding energy
+# - include TS using SE QM (and maybe single point DFT/HF)
+# - try another system!  let's pick one with uncharged ligand!
 
-# - try pulling into site w/ implicit solvent - less variation in orientation?
-# - compute binding free energy from our poor excuse for metadynamics
-#  - https://iris.sissa.it/retrieve/handle/20.500.11767/110289/124927/main.pdf ?
+# Other thoughts and ideas:
+# - FEP: looks like charged ligand might require smaller lambda steps to ensure sufficient overlap between steps!
+# - what about using expel_mm (or expel_md) to refine bindvec?
+#  - w/ a small number of trajectories, would we basically just pick the smallest barrier?
+# - what if we ran expel_mm() from multiple starting geometries (e.g. sampled from MD)?  How would we combine the results?
+# - can we make use of pulling out of site/(binding) reaction path for design? or just as a check?
+# - reverse roles of I,O and make sure things make sense qualitatively?
 
-bindvec = center_of_mass(molwt_AI, molwt_AI.select(ligin)) - center_of_mass(molwt_AI, molwt_AI.select(host))
-
-# vector from COM of host to COM of lig (to approximate normal vector of binding site)
-for mol0 in res.molAI:
-  center = np.mean(mol0.extents(), axis=0) + 5.0*normalize(bindvec)
-
-  mol = solvate_prepare(mol0, ffp, pad=6.0, center=center, solvent_chain='Z', neutral=True, eqsteps=None)
-  ligatoms = mol.select(ligin)
-  freeze = mol.select('protein and (extbackbone or resnum not in %r)' % nearres4)
-
-  ctx0 = openmm_MD_context(mol, ffp, T0, freeze=freeze, freezemass=0, constraints=None, nonbondedMethod=openmm.app.PME, rigidWater=True)
-  openmm.LocalEnergyMinimizer.minimize(ctx0, maxIterations=200)
-  mol.r = ctx0.getState(getPositions=True, enforcePeriodicBox=True).getPositions(asNumpy=True)/UNIT.angstrom
-
-  ctx = openmm_MD_context(mol, ffp, T0, freeze=freeze)
-  Rs, Es = openmm_dynamic(ctx, 20000, 100)
+# ... I think this is good enough for first attempt - now, how to combine the pieces: reactant binding, TS binding, product binding, water binding?
 
 
-# For explicit waters to be useful, we want to limit somehow to waters that would be displaced by lig (and
-#  keep waters from leaving site, as happened w/ simple relaxation)
-# Options/ideas:
-# - try relaxation with restraint holding (few) waters near site
-# - generate multiple candidates (w/ dE_search) using just lig, then do MD w/ and w/o lig in explicit water for each
-# - dE_mutations: start w/ lig unbound, pull into site ... substantial computation time, so explore other avenues first
+# - rank by TS - reactant (dE_search2); threshold on product; MD calc for reactant, product, water
+# - maybe do fep for a few theozymes?
+
+# - aside: some kind of MD w/ large motions instead of just thermal - large rotations of molecules, torsions?
+# ... that's just Monte Carlo!  Maybe try HMC to provide better ensemble for dE_binding?
 
 
-## crossover
-# - not clear this adds much - less than 1 kcal/mol improvement (dE_search2 results were already pretty good)
+
+## openmm metadynamics with distance of lig COM from some point as collective variable
+# ... looks like this would need to run for much longer to get useful results
+# ref: /home/mwhite/miniconda3/lib/python3.9/site-packages/openmm/app/metadynamics.py
+
+from openmm.app.metadynamics import Metadynamics, BiasVariable
+
+# Metadynamics.step(Simulation) doesn't provide easy way to save positions
+cvvals = []
+def meta_step(ii, ctx, meta):
+  cvpos = meta._force.getCollectiveVariableValues(ctx)
+  cvvals.append(cvpos[0])
+  energy = ctx.getState(getEnergy=True, groups={meta._force.getForceGroup()}).getPotentialEnergy()
+  height = meta.height*np.exp(-energy/(UNIT.MOLAR_GAS_CONSTANT_R * meta._deltaT))
+  meta._addGaussian(cvpos, height, ctx)
+
+
+center = np.mean(molpwt_AI.extents(), axis=0) + 5.0*normalize(bindvec)
+mol0 = prep_solvate(molpwt_AI, ffp, pad=6.0, center=center, solvent_chain='Z', neutral=True)
+mol = prep_relax(mol0, ffp, T0, freeze, eqsteps=2000)
+
+com = center_of_mass(mol, ligatoms)
+force = openmm.CustomCentroidBondForce(1, 'sqrt((x1-xc)^2 + (y1-yc)^2 + (z1-zc)^2)')
+force.addPerBondParameter('xc')
+force.addPerBondParameter('yc')
+force.addPerBondParameter('zc')
+force.addGroup(ligatoms)
+force.addBond([0], (com - 2.0*normalize(bindvec))*0.1)  # offset center 2A from COM; convert Angstrom to nm
+force.setForceGroup(31)
+
+cv = BiasVariable(force, 0*UNIT.angstrom, 15*UNIT.angstrom, 0.5*UNIT.angstrom)
+sys = ffp.createSystem(openmm_top(mol), constraints=openmm.app.HBonds, nonbondedMethod=openmm.app.PME, rigidWater=True)
+# constants inspired by openmm TestMetadynamics.py
+meta = Metadynamics(sys, [cv], T0*UNIT.kelvin, 4.0, 1.0*UNIT.kilojoules_per_mole, 100)
+#meta = Metadynamics(sys, [cv], T0*UNIT.kelvin, 4.0, 1000.0*UNIT.kilojoules_per_mole, 100)
+ctx = openmm_MD_context(mol, sys, T0, freeze=freeze)
+ctx.setVelocities(mol.md_vel*(UNIT.angstrom/UNIT.picosecond))
+Rs, Es = openmm_dynamic(ctx, 20000, 100, sampfn=partial(meta_step, meta=meta))
+
+
+## crossover between dE_search2 candidates
+# ... not clear this adds much - less than 1 kcal/mol improvement (dE_search2 results were already pretty good)
 # - might try random choice of crossover residues (i.e. w/o grouping)
-
-# - then we need to see what fraction of cross-over offspring are better than both, one, or neither parent(s)?
-# Then decide how to make use of cross-over:
-# - generational: create new generation w/ 2 offspring per couple, then mutations, plus best parents (replacing worst offspring)
-# - or? replace worse parent with offspring?
 
 def randsplit(mol, nearres):
   rCA = np.array([ mol.atoms[res_select(mol, resnum, 'CA')[0]].r for resnum in nearres ])
@@ -352,6 +432,131 @@ for it in range(200):
 save_zip('crossover1.zip', xres)
 
 sorted([min(dEx1, dEx2) - min(res.dE[ii], res.dE[jj]) for ii, jj, splitres, dEx1, dEx2 in xres])  # -> -6 kcal/mol
+
+# - then we need to see what fraction of cross-over offspring are better than both, one, or neither parent(s)?
+# Then decide how to make use of cross-over:
+# - generational: create new generation w/ 2 offspring per couple, then mutations, plus best parents (replacing worst offspring)
+# - or? replace worse parent with offspring?
+
+
+## OLD
+
+## push out/pull in lig from site w/ flat top Gaussian
+# ... looks like pulling in isn't going to be useful quantitatively
+# - what if we use lower temperature?
+#mol = prep_relax(Molecule(molpwt_AI), ffpgbsa, T0, freeze, eqsteps=2000) ... gbsa 2-3x slower than PME!
+
+
+center = np.mean(molpwt_AI.extents(), axis=0) + 5.0*normalize(bindvec)
+mol0 = prep_solvate(molpwt_AI, ffp, pad=6.0, center=center, solvent_chain='Z', neutral=True)
+mol = prep_relax(mol0, ffp, T0, freeze, eqsteps=2000)
+
+
+
+np.sum(Wneq)*KCALMOL_PER_HARTREE  # 104, 88, 68, 69.9
+plot(np.cumsum(Wneq)*KCALMOL_PER_HARTREE)
+
+simstate = ctx.getState(getPositions=True, getVelocities=True, enforcePeriodicBox=True)
+r1 = simstate.getPositions(asNumpy=True).value_in_unit(UNIT.angstrom)
+v1 = simstate.getVelocities(asNumpy=True).value_in_unit(UNIT.angstrom/UNIT.picosecond)
+
+#save_zip('push_wt2.zip', mol=mol, Rs=Rs, Es=Es, r1=r1, v1=v1, Wneq=Wneq)
+# mol, Rs = load_zip('push_wt2.zip', 'mol', 'Rs')
+
+dE_binding(mol, ffpgbsa, host, ligin, Rs[-1])
+
+notwat = mol.select('not water')
+res, r_opt = moloptim(OpenMM_EandG(molpwt_AI, ffpgbsa), Rs[-1][notwat], maxiter=50)
+dE_binding(molpwt_AI, ffpgbsa, host, ligin, r_opt)
+
+# explicit waters
+# - solvate and relax multiple times (also compare to pulling lig out of site)
+# - calc MM-GBSA binding energy for 1...N closest waters (to lig COM?)
+# ... see if there is a qualitative difference between different number of waters
+
+# list waters by proximity to lig COM
+
+def dE_binding_hoh2(mol, ff, r, r0, nwat, host='protein'):
+  ow = mol.select('water and znuc > 1')
+  dd = np.linalg.norm(r[ow] - r0, axis=1)
+  dsort = np.argsort(dd)
+  dd = dd[dsort]
+  nearhoh = [ mol.atoms[ow[ii]].resnum for ii in dsort ]
+  return [ dE_binding(mol, ff, host, mol.resatoms(nearhoh[:ii]), r) for ii in nwat ]
+
+
+# dE_binding varies from run-to-run (~1E-6) w/ GBSA (but not w/ no solvent)
+dE_binding_hoh2(mol, ffpgbsa, Rs[-1], com, range(1,17))
+
+# should we use overlap of vdW spheres to pick waters?  this will vary between frames ... is this OK if we are averaging?
+
+
+
+#hits, dd = mol.get_nearby([com], 7.0, active='water and znuc > 1', r=Rs[-1], dists=True)
+#mol.atomsres(hits)
+
+# For explicit waters to be useful, we want to limit somehow to waters that would be displaced by lig (and
+#  keep waters from leaving site, as happened w/ simple relaxation)
+# Options/ideas:
+# - try relaxation with restraint holding (few) waters near site
+# - generate multiple candidates (w/ dE_search) using just lig, then do MD w/ and w/o lig in explicit water for each
+# - dE_mutations: start w/ lig unbound, pull into site ... substantial computation time, so explore other avenues first
+
+
+# Done:
+# - MD calc for dE_search2 results - w/ lig and w/ waters
+#  - binding energy for waters
+#  - then try computing binding energy by pulling lig out of host (non-equilib work) (see below)
+#  - try metadynamics properly ... need to run for long time to be useful
+# - try pulling into site w/ implicit solvent - less variation in orientation? ... much slower, tried once, didn't get correct orientation
+# - compute binding free energy from our poor excuse for metadynamics
+#  - https://iris.sissa.it/retrieve/handle/20.500.11767/110289/124927/main.pdf ?
+
+
+#mdres = openmm_dynamic(ctx, 12000, 1, grad=True, vel=True)
+
+# debugging MD failures:
+r1 = ctx.getState(getPositions=True, enforcePeriodicBox=True).getPositions(asNumpy=True)/UNIT.angstrom
+#vis.select( unique(np.argwhere(np.isnan(r1))[:,0]) )
+r1[np.isnan(r1)] = 0
+
+## dE from pulling traj - see note below
+# what is our CV? distance from some point?
+
+com0 = center_of_mass(mol, ligatoms)
+origin0 = (com0 - 5.0*normalize(bindvec))
+
+# ...
+
+t_ramp = 200.0
+max_w = 1.4  # nm
+Emeta = []  # pulling force strength
+Smeta = []  # collective var
+def metafn(ii, ctx):
+  ctx.setParameter('std', min(max(1E-14, ii-10)/t_ramp, 1.0)*max_w)
+  Emeta.append( ctx.getState(getEnergy=True, groups={force.getForceGroup()}).getPotentialEnergy()/EUNIT )
+  r1 = ctx.getState(getPositions=True, enforcePeriodicBox=isPBC).getPositions(asNumpy=True)/UNIT.angstrom
+  Smeta.append(center_of_mass(mol, ligatoms, r1))
+
+Rs, Es = openmm_dynamic(ctx, 20000, 100, sampfn=metafn)
+
+# bin Emeta values by Smeta and average
+# - this has nothing to do with metadynamics and won't give anything like the free energy, but might still be
+#  interesting (maybe it will approach free energy as we pull slower?)
+Sbins = np.linspace(min(Smeta), max(Smeta), 20)
+Ebins = [ np.mean(Emeta[Smeta >= Sbins[ii] and Smeta < Sbins[ii+1]]) for ii in range(len(Sbins)-1) ]
+
+
+# anyway, I think we'd want to look at non-equilb free energy methods to get free energy from pulling
+# - how do we separate the work of our pulling force?
+# ... maybe use this fn: (have to do every time step? ... probably a reason this doesn't seem to be used as much as other methods)
+
+Wneq = []  # work
+def metafn(ii, ctx):
+  H0 = ctx.getState(getEnergy=True, groups={force.getForceGroup()}).getPotentialEnergy()/EUNIT
+  ctx.setParameter('std', min(max(1E-14, ii-10)/t_ramp, 1.0)*max_w)
+  H1 = ctx.getState(getEnergy=True, groups={force.getForceGroup()}).getPotentialEnergy()/EUNIT
+  Wmeta.append(H1 - H0)
 
 
 ## pull lig out of host, and push back in
@@ -389,9 +594,7 @@ force.addGroup(ligatoms)
 force.addBond([0], (com - 5.0*normalize(bindvec))*0.1)  # offset center 5A from COM; convert Angstrom to nm
 force.setForceGroup(31)
 
-sys = ffp.createSystem(openmm_top(mol), constraints=openmm.app.HBonds, nonbondedMethod=openmm.app.PME, rigidWater=True)
-sys.addForce(force)
-ctx = openmm_MD_context(mol, sys, T0, freeze=freeze)
+ctx = openmm_MD_context(mol, ffp, T0, freeze=freeze, forces=[force])
 
 #metafn = lambda ii,ctx: ctx.setParameter('t_meta', max(1E-14, ii-10))
 t_ramp = 200.0
@@ -432,9 +635,7 @@ force.setForceGroup(31)
 
 #force.setBondParameters(0, [0], (com + 11.0*normalize(bindvec))*0.1)
 #force.updateParametersInContext(ctx)
-sys = ffp.createSystem(openmm_top(mol), constraints=openmm.app.HBonds, nonbondedMethod=openmm.app.PME, rigidWater=True)
-sys.addForce(force)
-ctx = openmm_MD_context(mol, sys, T0, freeze=freeze)
+ctx = openmm_MD_context(mol, ffp, T0, freeze=freeze, forces=[force])
 
 t_ramp = 200.0
 revfn = lambda ii,ctx: ctx.setParameter('width', 1.0 - min(max(0, ii-10)/t_ramp, 1.0)*0.5)
@@ -513,15 +714,14 @@ for r1 in Rs:
 
 
 ## MORE
-# - we need to set up a system with PRE!
-# - explicit solvent w/o lig (for near waters) ... perhaps we should use all-GLY for this?
+# - we need to set up a system with PRE!  ... done
+# - explicit solvent w/o lig (for near waters) ... perhaps we should use all-GLY for this? ... done
 # ... should we populate all 3 sites to compare?
 # - some way to penalize voids more strongly (might help single point calc get closer to MD result)? First step would be notes on GBSA method
-## - find scaling factor which gives minimum RMSD between positions in explicit vs. implicit solvent MD, then maybe see what force needs to be added to implicit solvent case to match
+# - find scaling factor which gives minimum RMSD between positions in explicit vs. implicit solvent MD, then maybe see what force needs to be added to implicit solvent case to match
 
-# - save_zip: save string as .txt instead of .pkl
 # - test multithreading for pyscf
-# - should add a "charge" attribute to Molecule instead of having to keep track separately?
+# - should we add a "charge" attribute to Molecule instead of having to keep track separately?
 # - automated GAFF protonation check?
 
 
@@ -536,11 +736,11 @@ for r1 in Rs:
 # - rethink algorithm more broadly?
 # - possibility to accept regression using Metropolis rule?
 
-## - optimize for reactant and product separately, then ...
+# - optimize for reactant and product separately, then ...
 #  - pick nearest candidates from the two sets and ... ?
 
 
-## Old
+## Older
 
 ## maybe we shouldn't give up on deAI so easily - greatly simplifies the problem if it works!
 # - start with lig slightly displaced, possibly with force pulling toward nearres (toward CAs?)
@@ -820,8 +1020,98 @@ if 0:
   _, Rc = cluster_poses(np.array(Es), np.array(Rs), mol.select('//NE,CZ'), thresh=0.9)  # '//CZ,NE'
 
 
-mol = add_residue(Molecule(), 'GLY_LFZW', -180, 135)
-mol = add_residue(mol, 'ARG_LFZW', 180, 180)
-mol = add_residue(mol, 'GLY_LFZW', -135, -180)
-Rs = [ set_rotamer(mol, 1, angles).r for angles in get_rotamers('ARG') ]
-vis = Chemvis(Mol(mol, Rs, [VisGeom()])).run()
+if 0:
+  mol = add_residue(Molecule(), 'GLY_LFZW', -180, 135)
+  mol = add_residue(mol, 'ARG_LFZW', 180, 180)
+  mol = add_residue(mol, 'GLY_LFZW', -135, -180)
+  Rs = [ set_rotamer(mol, 1, angles).r for angles in get_rotamers('ARG') ]
+  vis = Chemvis(Mol(mol, Rs, [VisGeom()])).run()
+
+
+  ligres = mol0_AI.atomsres(ligin)[0]
+  #nearres8 = sorted(find_nearres(mol0_AI, '/A,B,C/*/~C,N,CA,O,H,HA', ligin, 8.0))
+  nearres8 = mol0_AI.atomsres(mol0_AI.get_nearby(ligin, 8.0, active='/A,B,C/*/~C,N,CA,O,H,HA'))
+  nearres, nearres_full = [ii for ii,rn in enumerate(nearres8) if rn in nearres], nearres
+
+  nearmols = [ molwt_AI.extract_atoms(resnums=molwt_AI.atomsres(molwt_AI.get_nearby(ligin, radius, active='/A,B,C/*/~C,N,CA,O,H,HA')) + [ligres]) for radius in [2,3,4,5,6,7,8] ]
+
+
+  nearres4 = molwt_AI.atomsres(molwt_AI.get_nearby(ligin, 4.0, active='sidechain'))
+
+  nearres7 = molwt_AI.atomsres(molwt_AI.get_nearby(ligin, 7.0, active='protein'))
+  # prevent lone residues
+  #unique([ resnum+ii for resnum in pocket for ii in [-1,0,1] ])
+
+  scatoms4 = molwt_AI.select('sidechain and resnum in %r' % nearres4)
+  pocket = unique(nearres4 + molwt_AI.atomsres(molwt_AI.get_nearby(scatoms4, 2.8, active='protein')))
+
+  nearmols = [ molwt_AI.extract_atoms(resnums=resnums + [ligres]) for resnums in [nearres4, nearres7, pocket] ]
+
+  # for nearres: 4 Ang - 13 residues
+  # for full model: 7 Ang - 29 residues
+
+  resatoms4 = [ a for resnum in nearres4 for a in molwt_AI.residues[resnum].atoms ]
+  scatoms4 = [ a for resnum in nearres4 for a in molwt_AI.residues[resnum].atoms if molwt_AI.atoms[a].name not in PDB_EXTBACKBONE]
+
+  scatoms4 = molwt_AI.select('sidechain and resnum in %r' % nearres4)
+
+  molwt_AI.get_nearby(ligin, 4.0, active='/A,B,C/*/~C,N,CA,O,H,HA')
+
+  nearres4p4 = molwt_AI.atomsres(molwt_AI.get_nearby(resatoms4, 4.0, active='/A,B,C/*/~C,N,CA,O,H,HA'))
+
+  nearmols4 = [ molwt_AI.extract_atoms(resnums = unique([ligres] + nearres4 + molwt_AI.atomsres(molwt_AI.get_nearby(scatoms4, radius, active='/A,B,C/*/~C,N,CA,O,H,HA')))) for radius in [0, 2.8, 3.0, 3.5, 4.0] ]
+
+  # Try dE_search2, w/ an eye toward where metadynamics might be useful
+  # - very low probability of random set of residues fitting ... identify problematic residues and try different rotatmer?
+  #  - add the residues one at a time? try different rotamers upon failure? - this might be better since multiple residues could be issue
+  # - start w/ smaller residues?
+
+
+  molp_AI = mol0_AI.extract_atoms(resnums=nearres8 + [ligres])
+  molp_AZ = None
+
+## can't run MD on battery, ha ha; also, MD fails for res.molAI[0] (strained
+
+mol0 = res.molAI[2]
+
+# graft onto full protein, and relax ... this does seem to fix MD failures
+mol1 = Molecule(molwt_AI)
+
+for ii,resnum in enumerate(nearres7):
+  if ii in nearres:
+    mutate_residue(mol1, resnum, mol0.extract_atoms(resnums=ii))
+
+for ii,jj in zip(mol1.residues[ligreswt].atoms, mol0.residues[ligres].atoms):
+  mol1.atoms[ii].r = mol0.atoms[jj].r
+
+res, mol1.r = moloptim(OpenMM_EandG(mol1, ffpgbsa, nonbondedMethod=openmm.app.CutoffNonPeriodic), mol1, maxiter=200)
+mol0 = mol1.extract_atoms(resnums=nearres7 + [ligreswt])
+
+dE_binding(mol0, ffpgbsa, host, ligin)
+
+# res.molAI[1] failing due to LEU 12 (PDB A 90) ... also res.molAI[2]
+# - maybe LYS 0, LYS 32 (PDB A 7, C 74) should be active?  review nearres choices?
+# - don't allow lone residues in partial model?
+## ... we need to rethink residues in nearres and freeze
+
+# res.molAI[3], [4], [5] fail immediately (also due to A 90 - ARG)?
+# ... all mols w/ ARG or LEU for A 90 seem to fail there
+# molAI[8] w/ LYS works!
+
+# how to serialize mol.md_vel?
+# - save openmm state instead?
+#  - why not? risk of openmm state becoming out of sync with mol
+#  - we would need to pass openmm state object in addition to mol, so manually copy velocity to mol
+# - use a different file format that allows arbitrary data fields (e.g. mmCIF)
+#  - Molden [AMBFOR] style xyz? mol2? with section for velocities ... we don't have code to write mol2
+#  - Tinker .dyn file? Amber restart file? ... why would you use one of these instead of openmm state?
+# - write md_vel field to separate file in the zip
+#  - name + ".md_vel.npy"
+# - save with pickle if md_vel present? :-(
+
+# is mol object the right place for velocity (as opposed to separate array)?
+# - seems reasonable - analogous to mol.r (i.e., option of additional separate r arrays doesn't preclude a default one in mol)
+
+# Need more study, thought on:
+# - FEP w/ charged ligand ... do we really need dF per-step < kBT, in which case many lambda steps needed for charged lig; could we replace lig with charges instead of having them be separate?
+# ... no, pretty sure there is no <kB*T limitation (that would be non-extensive) - we just need overlap between energy histograms

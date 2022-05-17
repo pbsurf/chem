@@ -153,6 +153,8 @@ def calcRDF(mol, pbcbox=None, nbins=200, maxdist=8):
   return bins, (1.0/norm)*hist/binvol
 
 
+## Old
+
 def solvate_prepare(mol, ff=None, T0=None, pad=6.0, center=None,
     solute_res=None, solvent_chain=None, neutral=False, eqsteps=5000):
   from .molecule import Molecule, Atom
@@ -183,7 +185,7 @@ def solvate_prepare(mol, ff=None, T0=None, pad=6.0, center=None,
   # short equilibriation (now using OpenMM instead of Tinker)
   #solvated.r = solvated.r + 0.5*side  # OpenMM centers box at side/2 instead of origin
   if eqsteps is not None:
-    ctx = openmm_MD_context(solvated, ff, T0, rigidWater=True)
+    ctx = openmm_MD_context(solvated, ff, T0, nonbondedMethod=openmm.app.PME, rigidWater=True)
     openmm.LocalEnergyMinimizer.minimize(ctx, maxIterations=100)
     if eqsteps > 0:
       ctx.getIntegrator().step(eqsteps)
@@ -193,8 +195,6 @@ def solvate_prepare(mol, ff=None, T0=None, pad=6.0, center=None,
     solvate.md_vel = simstate.getVelocities(asNumpy=True).value_in_unit(UNIT.angstrom/UNIT.picosecond)
   return solvated
 
-
-## Old
 
 #from .io.tinker import tinker_fep
 

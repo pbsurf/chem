@@ -7,6 +7,10 @@ from .molecule import *
 # original ref is QMMM.qm_EandG() - use this fn there instead (in which case maybe move this somewhere else)
 # also see: github.com/dspoel/Toy-MD
 
+# 1/(4*pi*eps0) == 1 in atomic units; use these only if trying to match AMBER or openmm numbers exactly for some reason
+AMBER_qqkscale = 332.0522173/(ANGSTROM_PER_BOHR*KCALMOL_PER_HARTREE)  # 0.999965380578321
+OPENMM_qqkscale = 332.06371335990205/(ANGSTROM_PER_BOHR*KCALMOL_PER_HARTREE)  # 1.0000000006209415
+
 # hard cutoff should never actually be used!
 def coulomb(rq, mq, mask=None, mask14=None, scale14=1.0, kscale=1.0, pbcbox=None, cutoff=None, hess=False, pairsout=None):
   """ return charge-charge energy, gradient, and Hessian (if hess=True) for charges `mq` at positions `rq`,
@@ -131,11 +135,10 @@ class MolLJ:
 
 # non-contact (Coulomb and/or vdW) potential for use with QMMM
 class NCMM:
-  def __init__(self, mol, qq=True, lj=True, qqscale14=1/1.2, ljscale14=1/2.0,
-      qqkscale=332.0522173/(ANGSTROM_PER_BOHR*KCALMOL_PER_HARTREE), cutoff=None):
+  def __init__(self, mol, qq=True, lj=True, qqscale14=1/1.2, ljscale14=1/2.0, qqkscale=1.0, cutoff=None):
     """ create energy and gradient calculator for Coulomb (unless qq=False) and Lennard-Jones (unless
-      lj=False) interactions in mol; qqscale14 and ljscale14 are scaling values for 1-4 interaction, and
-      qqkscale is scale factor for Coulomb constant, all with defaults appropriate for AMBER
+      lj=False) interactions in mol; qqscale14 and ljscale14 are scaling values for 1-4 interaction (w/
+      defaults appropriate for AMBER), and qqkscale is scale factor for Coulomb constant (see above)
     """
     self.qq, self.lj = qq, lj
     self.mmq = mol.mmq if qq else []
@@ -342,6 +345,51 @@ class SimpleMD:
 #v = v + (2*anew + 5*a - aprev)*dt/6
 
 
+# atomic number -> value dicts for GBSA parameters
+GBSA_RADIUS = { 6: 1.7, 7: 1.55, 8: 1.5, 9: 1.5, 14: 2.1, 15: 1.85, 16: 1.8, 17: 1.7 }  # Ang
+GBSA_SCREEN = { 1: 0.85, 6: 0.72, 7: 0.79, 8: 0.85, 9: 0.88, 15: 0.86, 16: 0.96 }  # unitless
+
+# GBSA implicit solvation energy - basically cut and paste of GBSAOBC1Force from openmm customgbforces.py
+# only energy, no derivative - so only useful for single point calcs for now
+def gbsa_E(mol, r=None, eps_solu=1.0, eps_solv=78.5, pairsout=None):
+  """ return GBSA solvation energy for `mol` (currently using AMBER/OpenMM OBC1 method) """
+  # H: 1.2 (1.3 if bonded to N); all other elements, use lookup table (or default of 1.5)
+  roffset = 0.009  # nm
+  or1 = np.array([ 0.1*((1.3 if mol.atoms[a.mmconnect[0]].znuc == 7 else 1.2)
+      if a.znuc == 1 else GBSA_RADIUS.get(a.znuc, 1.5)) - roffset for a in mol.atoms ])  # note conversion to nm!
+  # scaled radii
+  sr2 = np.array([ GBSA_SCREEN.get(a.znuc, 0.8) for a in mol.atoms ]) * or1
+
+  mmq = mol.mmq
+  rq = (mol.r if r is None else r)*0.1  # convert to nm
+  dr = rq[:,None,:] - rq[None,:,:]
+  r = np.sqrt(np.sum(dr*dr, axis=2))
+  np.fill_diagonal(r, 1.0)  # 0, np.inf, and np.nan are all problematic
+  # HCT analytical approx for \int_{vdW} r^-4 d^3r - 10.1021/jp961710n (1996)
+  L = np.fmax(np.abs(r - sr2), or1[:,None])
+  U = r + sr2
+  Iij = (r+sr2-or1 > 0) * 0.5*(1/L - 1/U + 0.25*(r - sr2**2/r)*(1/(U**2) - 1/(L**2)) + 0.5*np.log(L/U)/r)
+  np.fill_diagonal(Iij, 0)
+  I = np.sum(Iij, axis=1)
+  # OBC formula to get generalized Born radii - 10.1002/prot.20033 (2004)
+  or1ex = or1 + roffset
+  #B = 1/(1/or1 - I)  # HCT (Amber igb=1)
+  psi = I*or1
+  B = 1/(1/or1 - np.tanh(0.8*psi + 2.909125*psi**3)/or1ex)  # OBC1 (Amber igb=2)
+  #B = 1/(1/or1 - np.tanh(1.0*psi - 0.8*psi**2 + 4.85*psi**3)/or1ex)  # OBC2 (Amber igb=5)
+  # SA energy
+  Esa = (28.3919551 * (or1ex + 0.14)**2 * (or1ex/B)**6)/KJMOL_PER_HARTREE  # ACE SA
+  # GB energy
+  BB = B[:,None]*B[None,:]
+  qq = mmq[:,None]*mmq[None,:]
+  np.fill_diagonal(r, 0)  # this lets Egb expr. work for diagonal terms as well
+  fgb = np.sqrt(r**2 + BB*np.exp(-r**2/(4*BB)))
+  Egb = 0.5*np.sum(-138.935485*(1/eps_solu - 1/eps_solv)*qq/fgb, axis=1)/KJMOL_PER_HARTREE
+  if pairsout is not None:
+    pairsout['Egb'], pairsout['Esa'] = Egb, Esa
+  return np.sum(Egb + Esa)  #0.5*Egb + Esa)/KJMOL_PER_HARTREE  # Egb, Esa
+
+
 ## untested
 
 # idea for coulomb_atom(), lj_atom() is to quickly update energy after a single-atom Monte Carlo move
@@ -396,6 +444,7 @@ quit"""
 # - https://github.com/ParmEd/ParmEd/issues/1109
 def antechamber_prepare(mol, res, netcharge=0):
   import parmed
+  from .io import write_pdb
   dir = '{0}_amber'.format(res)
   os.mkdir(dir)
   os.chdir(dir)

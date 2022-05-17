@@ -206,8 +206,10 @@ def plot(*args, **kwargs):
   import matplotlib.pyplot as plt
   subplot = kwargs.pop('subplot', None)
   subplots = kwargs.pop('subplots', None)
+  block = kwargs.pop('block', False)
   if not subplot:  # None or 0 (first subplot)
-    plt.ion()  # interactive mode - make plot window non-blocking
+    if not block:
+      plt.ion()  # interactive mode - make plot window non-blocking
     plt.figure()
   if subplots is not None:
     plt.subplot(subplots[0], subplots[1], subplot+1)

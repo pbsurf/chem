@@ -609,7 +609,6 @@ class LineRenderer:
 
 
 # MolRender should probably be in separate module from geom renderers (geom_renderers.py?)
-# ball-and-stick?  separate radii for balls and sticks?
 class VisGeom:
 
   def __init__(self, style='licorice', sel=None, radius=1.0, stick_radius=1.0, stick_color=Color.black, coloring=color_by_element, colors=None, cache=True):
@@ -705,7 +704,7 @@ class VisGeom:
     self.active = mol.select(self.sel) if self.active is None else self.active
     atomnos = mol.znuc
     # line radius is in pixels, all others in Ang
-    radius = self.radius * (1.75 if self.style == 'lines' else 0.2)
+    radius = (self.radius if np.isscalar(self.radius) else 1.0) * (1.75 if self.style == 'lines' else 0.2)
     if self.style in ['licorice', 'lines']:
       activeset = frozenset(self.active) if self.sel is not None else None
       self.bonds = np.array(mol.get_bonds(activeset)) if self.bonds is None else self.bonds

@@ -9,9 +9,15 @@ class XYZ:
       active for optimization, `X` is object with 'r' attribute or r array or r[atoms] (i.e., already sliced)
       arrays of coordinates are flattened to 1D if `ravel` is True
     """
+    self.atoms = atoms  # for use w/ HDLC ... should we sort?
     # slice(None) as index selects all elements - note that gradfromxyz and active will return copies!
-    self.actv = active if active is not None else slice(None)
-    self.atoms = atoms  # for use w/ HDLC
+    if active is None:
+      self.actv = slice(None)
+    elif len(active) == 0 or self.atoms is None:
+      self.actv = active
+    else:  # both atoms and active specified - need to map indicies
+      activeset = frozenset(active)
+      self.actv = [ii for ii,a in enumerate(self.atoms) if a in activeset]
     self.ravel = ravel
     X = getattr(X, 'r', X)
     # atoms=range(...) will copy, but slice(...) returns view ... OK since len(slice()) throws!

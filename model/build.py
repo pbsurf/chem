@@ -221,11 +221,14 @@ def sort_atoms(mol):
 
 
 # replace sidechain
-def mutate_residue(mol, resnum, newres):
-  """ replace residue number `resnum` in `mol` with residue (name or object) `newres` """
+def mutate_residue(mol, resnum, newres, align=False):
+  """ replace residue number `resnum` in `mol` with residue (name or object) `newres`; if `align` is true,
+    sidechain (chi) angles of the new residue will be matched with the old
+  """
   newres = PDB_RES(newres) if type(newres) is str else Molecule(newres)
   # align backbone of new residue to old
   resnum = resnum if type(resnum) is int else mol.atoms[ mol.select(resnum)[0] ].resnum
+  oldangles = np.array(get_rotamer_angles(mol, resnum))*180/np.pi if align else None
   oldbb = res_select(mol, resnum, 'C,CA,N')
   newbb = res_select(newres, 0, 'C,CA,N')
   newca = newbb[1]
@@ -242,6 +245,8 @@ def mutate_residue(mol, resnum, newres):
   mol.residues[resnum].name = newres.residues[0].name
   ha = res_select(mol, resnum, 'HA,HA2', squash=True)[0]
   mol.atoms[ha].name = 'HA2' if schead == 'HA3' else 'HA'  # fix GLY
+  if align:
+    set_rotamer(mol, resnum, oldangles[0:len(get_rotamer_angles(mol, resnum))])
   return sort_atoms(mol)  #if sort else mol
 
 

@@ -5,7 +5,6 @@ from ..basics import *
 from ..molecule import Residue
 
 EUNIT = UNIT.kilojoule_per_mole*KJMOL_PER_HARTREE
-OPENMM_qqkscale = 332.06371335990205/(ANGSTROM_PER_BOHR*KCALMOL_PER_HARTREE)  # 1/(4*pi*eps0) in atomic units
 
 def openmm_top(mol):
   """ generate OpenMM topology from chem Molecule """
@@ -153,9 +152,21 @@ def openmm_create_system(mol, active=None, bondactive=None, nbargs={}):
 
 
 # freezemass = 0 works for LocalEnergyMinimizer, whereas huge freezemass works for constraints
-def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, freeze=[], freezemass=1E10, **kwargs):
-  sysargs = dict(dict(constraints=openmm.app.HBonds), **kwargs)  #nonbondedMethod=openmm.app.PME,
+def openmm_MD_context(mol, ff, T0,
+    p0=None, dt=4, intgr=None, r0=None, v0=None, freeze=[], freezemass=1E10, forces=[], **kwargs):
+  """ create OpenMM context for `mol`, w/ force field `ff`, temperature `T0` (Kelvin), and optionally,
+    pressure `p0` (bar), timestep `dt` (fs, default 4fs), integrator `intgr` (default: LangevinMiddleIntegrator),
+    with initial  positions and velocities r0 (Ang) and v0 (Ang/ps - default random thermal velocities for T0).
+    Atoms specified by `freeze` are fixed by setting mass to `freezemass` (default 1E10 - use 0 instead for
+    LocalEnergyMinimizer).  Additional `forces` added to system.  Other keyword args passed to ff.createSystem()
+  """
+  isPBC = mol.pbcbox is not None
+  nbmethod = openmm.app.PME if isPBC else openmm.app.NoCutoff
+  sysargs = dict(dict(constraints=openmm.app.HBonds, rigidWater=True, nonbondedMethod=nbmethod), **kwargs)
   sys = ff.createSystem(openmm_top(mol), **sysargs) if hasattr(ff, 'createSystem') else ff
+  for force in forces:
+    sys.addForce(force)
+  assert freeze is not None, "use freeze = [] instead of freeze = None"
   for ii in mol.select(freeze):
     sys.setParticleMass(ii, freezemass)
   if p0 is not None:
@@ -163,14 +174,21 @@ def openmm_MD_context(mol, ff, T0, p0=None, dt=4, intgr=None, freeze=[], freezem
   if intgr is None:
     intgr = openmm.LangevinMiddleIntegrator(T0*UNIT.kelvin, 1/UNIT.picosecond, dt*UNIT.femtoseconds)
   ctx = openmm.Context(sys, intgr)
-  ctx.setPositions(mol.r*UNIT.angstrom)
-  ctx.setVelocitiesToTemperature(T0*UNIT.kelvin)
-  if mol.pbcbox is not None:
+  ctx.setPositions((mol.r if r0 is None else r0)*UNIT.angstrom)
+  if np.ndim(v0) > 1:
+    ctx.setVelocities(v0*(UNIT.angstrom/UNIT.picosecond))
+  else:
+    ctx.setVelocitiesToTemperature(T0*UNIT.kelvin)
+  if isPBC:
     ctx.setPeriodicBoxVectors(*[v*UNIT.angstrom for v in np.diag(mol.pbcbox)])
   return ctx
 
 
-# for tracking down "Particle coordinate is nan" error
+# Notes on MD failures ("Particle coordinate is nan"):
+# - excessively strained system may fail w/ our default timestep
+# - get positions from current state and see which are NaN
+# - for rapid failures, use sampsteps=1 and examine last few frames
+#  - could we save last velocity to help quickly reproduce failure for less rapid cases?
 def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vel=False, sampfn=None, vis=None, verbose=1):
   """ Run OpenMM context `ctx` for `nsteps` and return position, potential energy, and, optionally, gradient
     (if `grad` is True) recorded every `sampsteps` steps (also call `sampfn` and update `vis`, if provided).
@@ -199,7 +217,7 @@ def openmm_dynamic(ctx, nsteps, sampsteps=100, grad=False, vel=False, sampfn=Non
         print('.', end='', flush=True)
   except (KeyboardInterrupt, Exception) as e:
     print("openmm_dynamic terminated by %s: %s" % (e.__class__.__name__, e))
-  print('')
+  print('\a')  # beep!
   return tuple(np.asarray(a) for a in (Rs, Es, Gs, Vs) if len(a) > 0)
 
 
@@ -267,7 +285,7 @@ class OpenMM_ForceField:  #(openmm.app.ForceField):
   """ Wrapper class to override default args for ForceField.createSystem() """
   def __init__(self, *args, **kwargs):
     self.sysargs = kwargs
-    self.ff = openmm.app.ForceField(*args)  #super(OpenMM_ForceField, self).__init__(*args)
+    self.ff = args[0] if hasattr(args[0], 'createSystem') else openmm.app.ForceField(*args)  #super(OpenMM_ForceField, self).__init__(*args)
 
   def createSystem(self, top, **kwargs):
     return self.ff.createSystem(top, **dict(self.sysargs, **kwargs))  #super(OpenMM_ForceField, self)

@@ -202,7 +202,7 @@ class Molecule:
   def resatoms(self, res):
     """ return list of atoms in residue(s) res """
     res = [res] if type(res) is int else res  #sorted(res)
-    return [a for r in res for a in r.atoms]
+    return [ a for resnum in res for a in self.residues[resnum].atoms ]
 
 
   def mass(self, active=None):
@@ -241,16 +241,27 @@ class Molecule:
     return list(conn)
 
 
-  def get_nearby(self, sel, radius, active=None, dists=False):
-    """ return atoms within `radius` of any atom in `sel`, excluding atoms in `sel` (and not in `active`) """
+  def get_nearby(self, sel, radius, active=None, r=None, dists=False, sort=False):
+    """ return atoms within `radius` of any atom (or point) in `sel`, excluding atoms in `sel` (and not in
+      `active`), also returning distances if `dists` is true and sorting by distance if `sort is true
+    """
     from scipy.spatial.ckdtree import cKDTree
-    sel, active, r = np.array(self.select(sel)), np.array(self.select(active)), self.r
-    active = np.setdiff1d(active, sel, assume_unique=True)
+    r = self.r if r is None else r
+    active = np.array(self.select(active))
+    if np.ndim(sel) > 1:
+      rsel = sel
+    else:
+      sel = np.array(self.select(sel))
+      active = np.setdiff1d(active, sel, assume_unique=True)
+      rsel = r[sel]
     #if len(sel) < 10:  -- kd-tree a bit slower for <~5, but not worth a potential len-dependent bug
     #dr = r[active][:,None,:] - r[sel][None,:,:];  dd = np.sqrt(np.min(np.sum(dr*dr, axis=2), axis=1))
-    dd, _ = cKDTree(r[sel]).query(r[active], distance_upper_bound=radius)
-    hits = active[dd <= radius].tolist()
-    return (hits, dd[dd <= radius]) if dists else hits
+    dd, _ = cKDTree(rsel).query(r[active], distance_upper_bound=radius)
+    hitsel = dd <= radius
+    dd, hits = dd[hitsel], active[hitsel]
+    ddsort = np.argsort(dd) if sort else slice(None)
+    hits = hits[ddsort].tolist()
+    return (hits, dd[ddsort]) if dists else hits
 
 
   def set_bonds(self, bonds, replace=True):
@@ -308,16 +319,13 @@ class Molecule:
   # See: MMTK InternalCoordinates.py
 
   def partition(self, a1, a2, only2=False):
-    # optimization ... unless a2 connected to other atoms - then we need full partition to check for errors
-    if only2 and (not self.atoms[a2].mmconnect or self.atoms[a2].mmconnect == [a1]):
-      return [], [a2]
     # we include other atom in list to accomplish isolation, then remove after fragment is built
     # if we want to preserve order for some reason, use dict() instead of set()
-    f1 = self.buildfrag(a1, set([a2])) - set([a2])  #[1:]
-    f2 = self.buildfrag(a2, set([a1])) - set([a1])  #[1:]
-    # make sure intersection is empty
-    assert not f1.intersection(f2), \
-      "Unable to partition molecule; is (%d, %d) bond part of cyclic structure?" % (a1, a2)
+    f1 = self.buildfrag(a1, set([a2])) - set([a2]) if not only2 else set()
+    f2 = self.buildfrag(a2, set([a1])) - set([a1])
+    # check for cyclic structure
+    cycle = f2.intersection(set(self.atoms[a1].mmconnect) - set([a2])) if only2 else f1.intersection(f2)
+    assert not cycle, "Unable to partition molecule; is (%d, %d) bond part of cyclic structure?" % (a1, a2)
     return list(f1), list(f2)
 
 
@@ -387,7 +395,8 @@ class Molecule:
     v1, v2, v3, v4 = [self.atoms[a].r for a in dihed]
     olddeg = calc_dihedral(v1, v2, v3, v4)
     if newdeg is not None:
-      f1, f2 = self.partition(dihed[1], dihed[2]) if incl3 else self.partition(dihed[2], dihed[3], only2=True)
+      idx = 1 if incl3 else 2
+      f1, f2 = self.partition(dihed[idx], dihed[idx+1], only2=True)
       delta = newdeg*np.pi/180 - (not rel and olddeg or 0)
       rotmat = rotation_matrix(v2 - v3, -delta)
       rotcent = self.atoms[dihed[2]].r
@@ -455,81 +464,9 @@ class Molecule:
 
 
 ## Utility fns for atom selection, etc.
-# Functions which act more or less symmetrically on two molecules shouldn't be part of
-#  molecule class.  Also, most functions which rely on only coordinates (i.e., don't
-#  need connectivity info, etc) should not be part of molecule class and should work
-#  with simple lists of coordinates
-
-def mol_fragments(mol, active=None):
-  """ return set of unconnected fragments from `active` (default, all) atoms in `mol` """
-  remaining = set(active if active is not None else mol.listatoms())
-  frags = []
-  while remaining:
-    frags.append(mol.get_connected(remaining.pop(), active=active))
-    remaining -= set(frags[-1])
-  return frags
-
-
-# any reason for option to only connect non-hydrogens?
-def fragment_connections(r, frags):
-  """ returns set of minimum distance connections needed to fully connect set of fragments specified by
-    `frags` - list of lists of indexes into `r` (as returned by mol_fragments())
-  """
-  from scipy.spatial.ckdtree import cKDTree
-  r_frags = [ [r[ii] for ii in frag] for frag in frags ]
-  kdtrees = [cKDTree(r_frag) for r_frag in r_frags[:-1]]
-  connect = []  # list to hold "bonds" needed to connect fragments
-  unconnected = set(range(len(frags)-1))
-  r_connected = r_frags[-1]
-  idx_connected = list(frags[-1])
-  while unconnected:
-    min_dist = np.inf
-    for ii,kd in enumerate(kdtrees):
-      if ii in unconnected:
-        dists, idxs = kd.query(r_connected)
-        min_idx = dists.argmin()
-        if dists[min_idx] < min_dist:
-          min_dist = dists[min_idx]
-          closest_frag = ii
-          closest_pair = (idx_connected[min_idx], frags[ii][idxs[min_idx]])
-    # connect next fragment
-    connect.append(closest_pair)
-    unconnected.remove(closest_frag)
-    r_connected.extend(r_frags[closest_frag])
-    idx_connected.extend(frags[closest_frag])
-  return connect
-
-
-def nearest_pairs(r_array, N):
-  """ return list of pairs (i,j), i < j for `N` nearest neighbors of points `r_array` """
-  from scipy.spatial.ckdtree import cKDTree
-  if N > len(r_array) - 1:
-    print("Warning: requested %d nearest neighbors but only %d points" % (N, len(r_array)))
-  ck = cKDTree(r_array)
-  dists, locs = ck.query(r_array, min(len(r_array), N+1))  # query returns same point, so query for N+1 points
-  return [ (ii, jj) for ii, loc in enumerate(locs) for jj in loc if jj > ii ]
-
-
-def generate_internals(bonds):  #, impropers=False):
-  """ generate angles, dihedrals, and improper torsions (w/ 2nd atom central atom) from a set of bonds """
-  max_idx = max([x for bond in bonds for x in bond]) if bonds else -1
-  connect = [ [] for ii in range(max_idx + 1) ]
-  for bond in bonds:
-    connect[bond[0]].append(bond[1])
-    connect[bond[1]].append(bond[0])
-  angles = [ (ii, jj, kk) for ii in range(len(connect))
-    for jj in connect[ii]
-    for kk in connect[jj] if kk > ii ]
-  diheds = [ (ii, jj, kk, ll) for ii in range(len(connect))
-    for jj in connect[ii]
-    for kk in connect[jj] if kk != ii
-    for ll in connect[kk] if ll != jj and ll > ii ]
-  imptor = [ (ii, jj, kk, ll) for ii in range(len(connect))
-    for jj in connect[ii]
-    for kk in connect[jj] if kk != ii
-    for ll in connect[jj] if ll != kk and ll > ii ]
-  return angles, diheds, imptor
-
+# Functions which act more or less symmetrically on two molecules shouldn't be part of molecule class.  Also,
+#  most functions which rely on only coordinates (i.e., don't need connectivity info, etc) should not be part
+#  of molecule class and should work with simple lists of coordinates
 
 def pdb_repr(mol, ii, sep=" "):
   """ get PDB string (chain res_num atom_name) for atom `ii` in `mol` """
@@ -548,6 +485,7 @@ def init_qmatoms(mol, sel, qmbasis):
 # consider returning a class with __call__ instead so we can set __repr__ to print sel string?
 # I tried a fancy selection scheme that only calculated what was needed for each atom ... but it ended up
 #  being slower, presumably due to branches and calls - see test/molecule_test.py
+# other possible selectors: solvent = (water or znuc == 11 or znuc == 17)
 def decode_atom_sel_str(sel):
   """ unqualifed exec() can't be in same function as a nested fn or lambda """
   locs = {}  # needed for Python 3
@@ -643,34 +581,7 @@ def res_select(mol, res, atoms, squash=False):
   return [h for h in hits if h is not None] if squash else hits
 
 
-# How might we support final box extents + total number of copies?
-# - this related to sphere packing, which is non-trivial
-# - maybe see https://stackoverflow.com/questions/9600801/evenly-distributing-n-points-on-a-sphere
-# - we could try low-discrepancy sequence to generate points, but still some probability of clash, and
-#  a single clash can break minimization
-# - consider removing shuffling or making it optional
-def tile_mol(mol, extents, shape, rand_rot=False, rand_offset=0):
-  """ tile `mol` with box `extents` symmetrically about its center `shape` times (x,y,z), optionally with
-    random rotation if `rand_rot`=True and random translation by 0 to +/-0.5 * `random_offset`
-  """
-  extents = np.asarray([extents]*3 if np.isscalar(extents) else extents)
-  extents = np.array([-0.5*extents, 0.5*extents]) if np.size(extents) == 3 else extents
-  unitcell = extents[1] - extents[0]
-  offset = 0.5*(np.array(shape)-1)
-  r0 = mol.r
-  tiled = Molecule()
-  ijks = [(ii, jj, kk) for ii in range(shape[0]) for jj in range(shape[1]) for kk in range(shape[2])]
-  np.random.shuffle(ijks)
-  # I think this could be vectorized
-  for ijk in ijks:
-    r = np.dot(r0, random_rotation()) if rand_rot else r0
-    r = r + (ijk - offset) * unitcell
-    r = r + rand_offset*(np.random.random(3) - 0.5) if rand_offset else r
-    tiled.append_atoms(mol, r)
-  return tiled
-
-
-## Analysis fns - these probably should be moved to a separate file
+## Analysis fns - move to analyze.py?  Arguably these are used often enough to leave here
 
 # note that unweighted average of all positions is the centroid while weighted average is the center of mass
 def center_of_mass(mol, active=None, r=None):

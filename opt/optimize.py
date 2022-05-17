@@ -5,14 +5,14 @@ from ..molecule import calc_RMSD
 from .coords import *
 
 
-def moloptim_mon(r, r0, E, G, Gc, timing={}):
+def moloptim_mon(r, r0, E, G, Gc, Eprev=0, t_tot=0, t_calc=0, neval=0, **kwargs):
   rmsd = calc_RMSD(r0, r)
   # note that |proj g| printed by minimize is max(abs(grad)) ... but won't print if verbose < 0
   rmsG, rmsGc = np.sqrt(np.sum(G*G)/len(G)), np.sqrt(np.sum(Gc*Gc)/len(Gc))  # RMS grad per atom
   maxG, maxGc = np.max(np.abs(G)), np.max(np.abs(Gc))  # largest grad component - for gtol
-  df = (timing.get('Eprev', E) - E)/max(abs(E), abs(timing.get('Eprev', E)))  # for ftol
+  df = (Eprev - E)/max(abs(E), abs(Eprev))  # for ftol
   # \u212B is symbol for Angstrom
-  print("[{:3d}] E: {:.6f} H ({:.2E}), G (H/\u212B): rms {:.6f}, max {:.6f} ({:.6f}, {:.6f}), RMSD: {:.3f} \u212B, Time: {:.3f}s ({:.3f}s)".format(timing.get('neval', 0), E, df, rmsG, maxG, rmsGc, maxGc, rmsd, timing.get('total', 0), timing.get('calc', 0)))
+  print("[{:3d}] E: {:.6f} H ({:.2E}), G (H/\u212B): rms {:.6f}, max {:.6f} ({:.6f}, {:.6f}), RMSD: {:.3f} \u212B, Time: {:.3f}s ({:.3f}s)".format(neval, E, df, rmsG, maxG, rmsGc, maxGc, rmsd, t_tot, t_calc))
 
 
 def monitor(fn):
@@ -83,9 +83,9 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
       gS = coords.gradfromxyz(G)
       # idea of Gc is to get cartesian grad excluding constraints
       Gc = coords.gradtoxyz(gS) if hasattr(coords, 'gradtoxyz') else gS  #np.zeros(1)
-      # call monitor fn, e.g. to print additional info
+      # call monitor fn, e.g. to print additional info - name all args so unwanted args can be swallowed w/ kwargs
       if mon and verbose >= -2 and (verbose >= -1 or objst.neval == 0):
-        mon(r, r0, E, G, Gc, dict(objst, coords=t1-t0, calc=t2-t1, total=t2-t0))
+        mon(r=r, E=E, G=G, Gc=Gc, r0=r0, mol=mol, t_coords=t1-t0, t_calc=t2-t1, t_tot=t2-t0, **objst)  # S,S0?
       if vis:
         vis.refresh(r=r, repaint=True)
       objst.neval = objst.neval + 1
@@ -108,9 +108,10 @@ def moloptim(fn, r0=None, S0=None, mol=None, fnargs={}, coords=None, gtol=1E-05,
       maxiter -= res.nit
       break
     except ValueError as e:
-      if e.message == 'Stop':  # allow fn to stop optim based on some internal criteria
+      msg = getattr(e, 'message', None)
+      if msg == 'Stop':  # allow fn to stop optim based on some internal criteria
         break
-      if e.message != 'Coord breakdown':
+      if msg != 'Coord breakdown':
         raise
       if not objst.updateok:
         print("Coord breakdown on first iteration - unable to continue")

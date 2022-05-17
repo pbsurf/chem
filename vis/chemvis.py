@@ -124,7 +124,7 @@ IO: slower/faster animation
     if refresh:
       for hit in self.selection:
         hit.r = hit.vismol.curr_r[hit.idx] if hit.vismol else hit.r
-    if sel or pdb:
+    if sel is not None or pdb is not None:
       child = self.children[mol] if type(mol) is int else None
       mol = child.mol if child else mol
       r_array = child.curr_r if child else mol.r
@@ -546,7 +546,7 @@ class Files:
 
   def __len__(self):
     if self.file_glob:
-      self.mol_files = sorted(glob.glob(self.file_glob))
+      self.mol_files = sorted(glob.glob(self.file_glob)) or [self.file_glob]
     return len(self.mol_files)
 
   def __getitem__(self, mol_number):
