@@ -1,6 +1,7 @@
-chem: collection of mostly python code for molecular visualization, QM/MM, FEP, etc.  Very long-term goal is something like enzyme design.  Intended for interactive use from standard python prompt.
+## chem ##
+Collection of mostly python code for molecular visualization, QM/MM, FEP, etc.  Very long-term goal is something like enzyme design.  Intended for interactive use from standard python prompt.
 
-Major features:
+### Major features ###
 - 3D visualization of molecular geometry, orbitals, ESP, etc.
   - fast OpenGL volume and isosurface rendering
   - oriented toward analysis and debugging of calculations rather than presentation (for that, try [molstar](https://github.com/molstar/molstar))
@@ -11,7 +12,7 @@ Major features:
 - model creation and setup: build polypeptides, add hydrogens and bonds, mutate residues, solvate
 - free energy methods: FEP, BAR, umbrella sampling
 
-How to use this code:
+### How to use this code ###
 1. If an example in projects/ or test/ looks promising, try using that as a starting point ... currently, most of the examples are outdated or work-in-progress.  Open an issue describing what you're interested in doing and I'll help with getting started.
 - add `import pdb; pdb.set_trace()` to step line by line
 - see "Examples" in test/vis_test.py for standalone visualization examples
@@ -29,7 +30,7 @@ or
  - model/build.py: build polypeptides, add hydrogens and bonds, mutate residues, set rotamers
  - model/prepare.py: build solvent box, solvate, neutralize, check geometry
 
-Requirements:
+### Requirements ###
 - Python 3 w/ scipy and numpy (should mostly still work with Python 2.7)
 - [OpenMM](https://openmm.org/) - molecular mechanics calculations
 - [PySCF](https://github.com/sunqm/pyscf) - quantum chemistry calculations
@@ -45,6 +46,7 @@ Optionally:
 
 Credit to [chemlab](https://github.com/chemlab/chemlab/) (3D camera, some shaders) and [speck](https://github.com/wwwtyro/speck) (some shaders), among others.
 
-Screenshot: 1MCT.pdb shown with backbone ribbon, MM atoms as lines, QM atoms as sticks, and components of QM/MM force on each atom as yellow, cyan, magenta cylinders.
+### Screenshot ###
+1MCT.pdb shown with backbone ribbon, MM atoms as lines, QM atoms as sticks, and components of QM/MM force on each atom as yellow, cyan, magenta cylinders.
 
 ![Screenshot](misc/screenshot.png)
